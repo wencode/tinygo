@@ -253,7 +253,7 @@ func (t Type) Field(i int) StructField {
 			// There is a tag.
 			var tagNum uintptr
 			tagNum, p = readVarint(p)
-			field.Tag = readStringSidetable(unsafe.Pointer(&structNamesSidetable), tagNum)
+			field.Tag = StructTag(readStringSidetable(unsafe.Pointer(&structNamesSidetable), tagNum))
 		} else {
 			// There is no tag.
 			field.Tag = ""
@@ -523,9 +523,15 @@ type StructField struct {
 	PkgPath string
 
 	Type      Type
-	Tag       string
+	Tag       StructTag
 	Anonymous bool
 	Offset    uintptr
+}
+
+type StructTag string
+
+func (t StructTag) Get(key string) string {
+	panic("unimplemented: (reflect.StructTag).Get()")
 }
 
 // TypeError is the error that is used in a panic when invoking a method on a
