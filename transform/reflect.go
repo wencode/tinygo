@@ -120,6 +120,11 @@ type typeCodeAssignmentState struct {
 	// all. If it is false, namedNonBasicTypesSidetable will contain simple
 	// monotonically increasing numbers.
 	needsNamedNonBasicTypesSidetable bool
+
+	// These two slices contain the number of methods on named types, and are
+	// stored in the output binary with similar names.
+	namedBasicNumMethodSidetable    []byte
+	namedNonBasicNumMethodSidetable []byte
 }
 
 // assignTypeCodes is used to assign a type code to each type in the program
@@ -138,7 +143,7 @@ func assignTypeCodes(mod llvm.Module, typeSlice typeInfoSlice) {
 		arrayTypes:                       make(map[string]int),
 		structTypes:                      make(map[string]int),
 		structNames:                      make(map[string]int),
-		needsNamedNonBasicTypesSidetable: len(getUses(mod.NamedGlobal("reflect.namedNonBasicTypesSidetable"))) != 0,
+		needsNamedNonBasicTypesSidetable: len(getUses(mod.NamedGlobal("reflect.namedNonBasicTypesSidetable"))) != 0 || len(getUses(mod.NamedGlobal("reflect.namedNonBasicNumMethodSidetable"))) != 0,
 		needsStructTypesSidetable:        len(getUses(mod.NamedGlobal("reflect.structTypesSidetable"))) != 0,
 		needsStructNamesSidetable:        len(getUses(mod.NamedGlobal("reflect.structNamesSidetable"))) != 0,
 		needsArrayTypesSidetable:         len(getUses(mod.NamedGlobal("reflect.arrayTypesSidetable"))) != 0,
@@ -157,7 +162,21 @@ func assignTypeCodes(mod llvm.Module, typeSlice typeInfoSlice) {
 
 	// Only create this sidetable when it is necessary.
 	if state.needsNamedNonBasicTypesSidetable {
-		global := replaceGlobalIntWithArray(mod, "reflect.namedNonBasicTypesSidetable", state.namedNonBasicTypesSidetable)
+		if len(getUses(mod.NamedGlobal("reflect.namedNonBasicTypesSidetable"))) != 0 {
+			global := replaceGlobalIntWithArray(mod, "reflect.namedNonBasicTypesSidetable", state.namedNonBasicTypesSidetable)
+			global.SetLinkage(llvm.InternalLinkage)
+			global.SetUnnamedAddr(true)
+			global.SetGlobalConstant(true)
+		}
+		if len(getUses(mod.NamedGlobal("reflect.namedNonBasicNumMethodSidetable"))) != 0 {
+			global := replaceGlobalIntWithArray(mod, "reflect.namedNonBasicNumMethodSidetable", state.namedNonBasicNumMethodSidetable)
+			global.SetLinkage(llvm.InternalLinkage)
+			global.SetUnnamedAddr(true)
+			global.SetGlobalConstant(true)
+		}
+	}
+	if len(getUses(mod.NamedGlobal("reflect.namedBasicNumMethodSidetable"))) != 0 {
+		global := replaceGlobalIntWithArray(mod, "reflect.namedBasicNumMethodSidetable", state.namedBasicNumMethodSidetable)
 		global.SetLinkage(llvm.InternalLinkage)
 		global.SetUnnamedAddr(true)
 		global.SetGlobalConstant(true)
@@ -189,9 +208,12 @@ func (state *typeCodeAssignmentState) getTypeCodeNum(typecode llvm.Value) *big.I
 	// Note: see src/reflect/type.go for bit allocations.
 	class, value := getClassAndValueFromTypeCode(typecode)
 	name := ""
+	var namedNumMethods uint64 // number of methods for a named type
 	if class == "named" {
 		name = value
-		typecode = llvm.ConstExtractValue(typecode.Initializer(), []uint32{0})
+		initializer := typecode.Initializer()
+		typecode = llvm.ConstExtractValue(initializer, []uint32{0})
+		namedNumMethods = llvm.ConstExtractValue(initializer, []uint32{2}).ZExtValue()
 		class, value = getClassAndValueFromTypeCode(typecode)
 	}
 	if class == "basic" {
@@ -205,7 +227,7 @@ func (state *typeCodeAssignmentState) getTypeCodeNum(typecode llvm.Value) *big.I
 		}
 		if name != "" {
 			// This type is named, set the upper bits to the name ID.
-			num |= int64(state.getBasicNamedTypeNum(name)) << 5
+			num |= int64(state.getBasicNamedTypeNum(name, namedNumMethods)) << 5
 		}
 		return big.NewInt(num << 1)
 	} else {
@@ -248,6 +270,14 @@ func (state *typeCodeAssignmentState) getTypeCodeNum(typecode llvm.Value) *big.I
 				index := len(state.namedNonBasicTypesSidetable)
 				state.namedNonBasicTypesSidetable = append(state.namedNonBasicTypesSidetable, 0)
 				state.namedNonBasicTypes[name] = index
+				// Also store the number of methods.
+				if index != len(state.namedNonBasicNumMethodSidetable) {
+					panic("unexpected side table length")
+				}
+				if uint64(byte(namedNumMethods)) != namedNumMethods {
+					panic("too many methods for type " + name)
+				}
+				state.namedNonBasicNumMethodSidetable = append(state.namedNonBasicNumMethodSidetable, byte(namedNumMethods))
 				// Get the typecode of the underlying type (which could be the
 				// element type in the case of pointers, for example).
 				num = state.getNonBasicTypeCode(class, typecode)
@@ -316,12 +346,19 @@ func getClassAndValueFromTypeCode(typecode llvm.Value) (class, value string) {
 // getBasicNamedTypeNum returns an appropriate (unique) number for the given
 // named type. If the name already has a number that number is returned, else a
 // new number is returned. The number is always non-zero.
-func (state *typeCodeAssignmentState) getBasicNamedTypeNum(name string) int {
+func (state *typeCodeAssignmentState) getBasicNamedTypeNum(name string, numMethods uint64) int {
 	if num, ok := state.namedBasicTypes[name]; ok {
 		return num
 	}
 	num := len(state.namedBasicTypes) + 1
 	state.namedBasicTypes[name] = num
+	if uint64(byte(numMethods)) != numMethods {
+		panic("too many methods for type " + name)
+	}
+	if len(state.namedBasicNumMethodSidetable) != num-1 {
+		panic("unexpected side table length")
+	}
+	state.namedBasicNumMethodSidetable = append(state.namedBasicNumMethodSidetable, byte(numMethods))
 	return num
 }
 
@@ -381,15 +418,21 @@ func (state *typeCodeAssignmentState) getStructTypeNum(typecode llvm.Value) int 
 	}
 
 	// Get the fields this struct type contains.
-	// The struct number will be the start index of
-	structTypeGlobal := llvm.ConstExtractValue(typecode.Initializer(), []uint32{0}).Operand(0).Initializer()
+	// The struct number will be the start index into
+	// reflect.structTypesSidetable.
+	typecodeID := typecode.Initializer()
+	structTypeGlobal := llvm.ConstExtractValue(typecodeID, []uint32{0}).Operand(0).Initializer()
 	numFields := structTypeGlobal.Type().ArrayLength()
+	numMethods := llvm.ConstExtractValue(typecodeID, []uint32{2}).ZExtValue()
 
-	// The first data that is stored in the struct sidetable is the number of
-	// fields this struct contains. This is usually just a single byte because
-	// most structs don't contain that many fields, but make it a varint just
-	// to be sure.
-	buf := makeVarint(uint64(numFields))
+	// The first element that is stored in the struct sidetable is the number
+	// of methods this struct has. It is used by Type.NumMethod().
+	buf := makeVarint(numMethods)
+	// The second element that is stored in the struct sidetable is the number
+	// of fields this struct contains. This is usually just a single byte
+	// because most structs don't contain that many fields, but make it a varint
+	// just to be sure.
+	buf = append(buf, makeVarint(uint64(numFields))...)
 
 	// Iterate over every field in the struct.
 	// Every field is stored sequentially in the struct sidetable. Fields can

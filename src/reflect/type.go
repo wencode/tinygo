@@ -142,6 +142,20 @@ func (t Type) Kind() Kind {
 	}
 }
 
+// isBasic returns true if (and only if) this is a basic type.
+func (t Type) isBasic() bool {
+	return t%2 == 0
+}
+
+// isNamed returns true if (and only if) this is a named type.
+func (t Type) isNamed() bool {
+	if t.isBasic() {
+		return t>>6 != 0
+	} else {
+		return (t>>4)%2 != 0
+	}
+}
+
 // Elem returns the element type for channel, slice and array types, the
 // pointed-to value for pointer types, and the key type for map types.
 func (t Type) Elem() Type {
@@ -166,7 +180,7 @@ func (t Type) Elem() Type {
 func (t Type) stripPrefix() Type {
 	// Look at the 'n' bit in the type code (see the top of this file) to see
 	// whether this is a named type.
-	if (t>>4)%2 != 0 {
+	if t.isNamed() {
 		// This is a named type. The data is stored in a sidetable.
 		namedTypeNum := t >> 5
 		n := *(*uintptr)(unsafe.Pointer(uintptr(unsafe.Pointer(&namedNonBasicTypesSidetable)) + uintptr(namedTypeNum)*unsafe.Sizeof(uintptr(0))))
@@ -184,7 +198,11 @@ func (t Type) Field(i int) StructField {
 	}
 	structIdentifier := t.stripPrefix()
 
-	numField, p := readVarint(unsafe.Pointer(uintptr(unsafe.Pointer(&structTypesSidetable)) + uintptr(structIdentifier)))
+	// Skip past the NumMethod field.
+	_, p := readVarint(unsafe.Pointer(uintptr(unsafe.Pointer(&structTypesSidetable)) + uintptr(structIdentifier)))
+
+	// Read the NumField field.
+	numField, p := readVarint(p)
 	if uint(i) >= uint(numField) {
 		panic("reflect: field index out of range")
 	}
@@ -283,7 +301,10 @@ func (t Type) NumField() int {
 		panic(&TypeError{"NumField"})
 	}
 	structIdentifier := t.stripPrefix()
-	n, _ := readVarint(unsafe.Pointer(uintptr(unsafe.Pointer(&structTypesSidetable)) + uintptr(structIdentifier)))
+	// Skip past the NumMethod field.
+	_, p := readVarint(unsafe.Pointer(uintptr(unsafe.Pointer(&structTypesSidetable)) + uintptr(structIdentifier)))
+	// Read the NumField field.
+	n, _ := readVarint(p)
 	return int(n)
 }
 
@@ -401,10 +422,49 @@ func (t Type) AssignableTo(u Type) bool {
 }
 
 func (t Type) Implements(u Type) bool {
-	if t.Kind() != Interface {
+	if u.Kind() != Interface {
 		panic("reflect: non-interface type passed to Type.Implements")
 	}
-	return u.AssignableTo(t)
+	if u.NumMethod() == 0 {
+		// Empty interface, therefore implements any type.
+		return true
+	}
+	// Type u has methods.
+	if t.NumMethod() == 0 {
+		// Type t has no methods, while u has. Therefore, t cannot implement u.
+		return false
+	}
+	// Now we'd have to compare individual methods.
+	// This has not yet been implemented.
+	panic("unimplemented: (reflect.Type).Implements()")
+}
+
+func (t Type) NumMethod() int {
+	if t.isBasic() {
+		if !t.isNamed() {
+			// Not a named type, so can't have methods.
+			return 0
+		}
+		// Named type methods are stored in a sidetable.
+		namedTypeNum := t >> 6
+		return int(*(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(&namedBasicNumMethodSidetable)) + uintptr(namedTypeNum) - 1)))
+	} else {
+		if !t.isNamed() {
+			// Most non-named types cannot have methods. However, structs can
+			// because they can embed named values.
+			if t.Kind() == Struct {
+				structIdentifier := t.stripPrefix()
+				numMethod, _ := readVarint(unsafe.Pointer(uintptr(unsafe.Pointer(&structTypesSidetable)) + uintptr(structIdentifier)))
+				return int(numMethod)
+			}
+			// Not a named type so can't have methods on that, and also not a
+			// struct type that may have embedded fields.
+			return 0
+		}
+		// Named non-basic type, so read the number of methods from a sidetable.
+		namedTypeNum := t >> 5
+		return int(*(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(&namedNonBasicNumMethodSidetable)) + uintptr(namedTypeNum))))
+	}
 }
 
 // Comparable returns whether values of this type can be compared to each other.

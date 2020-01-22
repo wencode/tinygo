@@ -72,13 +72,26 @@ func (c *compilerContext) getTypeCode(typ types.Type) llvm.Value {
 			structGlobal := c.makeStructTypeFields(typ)
 			references = llvm.ConstBitCast(structGlobal, global.Type())
 		}
-		if !references.IsNil() {
+		methodSet := types.NewMethodSet(typ)
+		numMethods := 0
+		for i := 0; i < methodSet.Len(); i++ {
+			if methodSet.At(i).Obj().Exported() {
+				numMethods++
+			}
+		}
+		if !references.IsNil() || numMethods != 0 {
 			// Set the 'references' field of the runtime.typecodeID struct.
 			globalValue := llvm.ConstNull(global.Type().ElementType())
-			globalValue = llvm.ConstInsertValue(globalValue, references, []uint32{0})
+			if !references.IsNil() {
+				globalValue = llvm.ConstInsertValue(globalValue, references, []uint32{0})
+			}
 			if length != 0 {
 				lengthValue := llvm.ConstInt(c.uintptrType, uint64(length), false)
 				globalValue = llvm.ConstInsertValue(globalValue, lengthValue, []uint32{1})
+			}
+			if numMethods != 0 {
+				numMethodsValue := llvm.ConstInt(c.uintptrType, uint64(numMethods), false)
+				globalValue = llvm.ConstInsertValue(globalValue, numMethodsValue, []uint32{2})
 			}
 			global.SetInitializer(globalValue)
 			global.SetLinkage(llvm.PrivateLinkage)
