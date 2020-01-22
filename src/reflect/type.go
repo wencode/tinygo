@@ -475,6 +475,14 @@ func (t Type) NumMethod() int {
 	}
 }
 
+func (t Type) Name() string {
+	panic("unimplemented: (reflect.Type).Name()")
+}
+
+func (t Type) Key() Type {
+	panic("unimplemented: (reflect.Type).Key()")
+}
+
 // Comparable returns whether values of this type can be compared to each other.
 func (t Type) Comparable() bool {
 	switch t.Kind() {

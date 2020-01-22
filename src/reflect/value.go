@@ -517,6 +517,18 @@ func (v Value) NumMethod() int {
 	return v.Type().NumMethod()
 }
 
+func (v Value) OverflowFloat(x float64) bool {
+	panic("unimplemented: (reflect.Value).OverflowFloat()")
+}
+
+func (v Value) OverflowInt(x int64) bool {
+	panic("unimplemented: (reflect.Value).OverflowInt()")
+}
+
+func (v Value) OverflowUint(x uint64) bool {
+	panic("unimplemented: (reflect.Value).OverflowUint()")
+}
+
 func (v Value) MapKeys() []Value {
 	panic("unimplemented: (reflect.Value).MapKeys()")
 }
@@ -640,10 +652,34 @@ func (v Value) SetString(x string) {
 	}
 }
 
+func (v Value) SetBytes(x []byte) {
+	panic("unimplemented: (reflect.Value).SetBytes()")
+}
+
+func (v Value) SetCap(n int) {
+	panic("unimplemented: (reflect.Value).SetCap()")
+}
+
+func (v Value) SetLen(n int) {
+	panic("unimplemented: (reflect.Value).SetLen()")
+}
+
+func (v Value) SetMapIndex(key, elem Value) {
+	panic("unimplemented: (reflect.Value).SetMapIndex()")
+}
+
 func (v Value) checkAddressable() {
 	if !v.isIndirect() {
 		panic("reflect: value is not addressable")
 	}
+}
+
+func (v Value) Convert(t Type) Value {
+	panic("unimplemented: (reflect.Value).Convert()")
+}
+
+func MakeMap(typ Type) Value {
+	panic("unimplemented: reflect.MakeMap()")
 }
 
 func MakeSlice(typ Type, len, cap int) Value {
@@ -656,6 +692,10 @@ func Zero(typ Type) Value {
 
 func New(typ Type) Value {
 	panic("unimplemented: reflect.New()")
+}
+
+func Copy(dst, src Value) int {
+	panic("unimplemented: reflect.Copy()")
 }
 
 type funcHeader struct {
