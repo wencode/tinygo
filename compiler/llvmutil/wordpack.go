@@ -11,7 +11,7 @@ import (
 
 // EmitPointerPack packs the list of values into a single pointer value using
 // bitcasts, or else allocates a value on the heap if it cannot be packed in the
-// pointer value directly. It returns the pointer with the packed data.
+// pointer value directly. It returns the pointer with the packed data as an *i8.
 // If the values are all constants, they are be stored in a constant global and deduplicated.
 func EmitPointerPack(builder llvm.Builder, mod llvm.Module, config *compileopts.Config, values []llvm.Value) llvm.Value {
 	ctx := mod.Context()
@@ -26,7 +26,6 @@ func EmitPointerPack(builder llvm.Builder, mod llvm.Module, config *compileopts.
 	packedType := ctx.StructType(valueTypes, false)
 
 	// Allocate memory for the packed data.
-	var packedAlloc, packedHeapAlloc llvm.Value
 	size := targetData.TypeAllocSize(packedType)
 	if size == 0 {
 		return llvm.ConstPointerNull(i8ptrType)
@@ -41,7 +40,14 @@ func EmitPointerPack(builder llvm.Builder, mod llvm.Module, config *compileopts.
 		}
 		// Because packedType is a struct and we have to cast it to a *i8, store
 		// it in an alloca first for bitcasting (store+bitcast+load).
-		packedAlloc, _, _ = CreateTemporaryAlloca(builder, mod, packedType, "")
+		packedAlloc, packedPtr, packedSize := CreateTemporaryAlloca(builder, mod, i8ptrType, "pack.alloca")
+		builder.CreateStore(llvm.ConstNull(i8ptrType), packedAlloc)
+		packedAllocCast := builder.CreateBitCast(packedAlloc, llvm.PointerType(packedType, 0), "")
+		storeAllValues(builder, ctx, packedAllocCast, values)
+		// Load value (as *i8) from the alloca.
+		result := builder.CreateLoad(packedAlloc, "")
+		EmitLifetimeEnd(builder, mod, packedPtr, packedSize)
+		return result
 	} else {
 		// Check if the values are all constants.
 		constant := true
@@ -67,42 +73,37 @@ func EmitPointerPack(builder llvm.Builder, mod llvm.Module, config *compileopts.
 		// Packed data is bigger than a pointer, so allocate it on the heap.
 		sizeValue := llvm.ConstInt(uintptrType, size, false)
 		alloc := mod.NamedFunction("runtime.alloc")
-		packedHeapAlloc = builder.CreateCall(alloc, []llvm.Value{
+		packedAlloc := builder.CreateCall(alloc, []llvm.Value{
 			sizeValue,
 			llvm.Undef(i8ptrType),            // unused context parameter
 			llvm.ConstPointerNull(i8ptrType), // coroutine handle
-		}, "")
+		}, "pack.alloc")
 		if config.NeedsStackObjects() {
 			trackPointer := mod.NamedFunction("runtime.trackPointer")
 			builder.CreateCall(trackPointer, []llvm.Value{
-				packedHeapAlloc,
+				packedAlloc,
 				llvm.Undef(i8ptrType),            // unused context parameter
 				llvm.ConstPointerNull(i8ptrType), // coroutine handle
 			}, "")
 		}
-		packedAlloc = builder.CreateBitCast(packedHeapAlloc, llvm.PointerType(packedType, 0), "")
+		packedAllocCast := builder.CreateBitCast(packedAlloc, llvm.PointerType(packedType, 0), "")
+		storeAllValues(builder, ctx, packedAllocCast, values)
+		// Bitcast the result to *i8, which is the expected return type.
+		return builder.CreateBitCast(packedAllocCast, i8ptrType, "")
 	}
-	// Store all values in the alloca or heap pointer.
+}
+
+// storeAllValues stores all values to the ptr, assuming that ptr is a pointer
+// to a struct with fields corresponding to the given values.
+func storeAllValues(builder llvm.Builder, ctx llvm.Context, ptr llvm.Value, values []llvm.Value) {
+	int32Type := ctx.Int32Type()
 	for i, value := range values {
 		indices := []llvm.Value{
-			llvm.ConstInt(ctx.Int32Type(), 0, false),
-			llvm.ConstInt(ctx.Int32Type(), uint64(i), false),
+			llvm.ConstInt(int32Type, 0, false),
+			llvm.ConstInt(int32Type, uint64(i), false),
 		}
-		gep := builder.CreateInBoundsGEP(packedAlloc, indices, "")
+		gep := builder.CreateInBoundsGEP(ptr, indices, "")
 		builder.CreateStore(value, gep)
-	}
-
-	if packedHeapAlloc.IsNil() {
-		// Load value (as *i8) from the alloca.
-		packedAlloc = builder.CreateBitCast(packedAlloc, llvm.PointerType(i8ptrType, 0), "")
-		result := builder.CreateLoad(packedAlloc, "")
-		packedPtr := builder.CreateBitCast(packedAlloc, i8ptrType, "")
-		packedSize := llvm.ConstInt(ctx.Int64Type(), targetData.TypeAllocSize(packedAlloc.Type()), false)
-		EmitLifetimeEnd(builder, mod, packedPtr, packedSize)
-		return result
-	} else {
-		// Get the original heap allocation pointer, which already is an *i8.
-		return packedHeapAlloc
 	}
 }
 
