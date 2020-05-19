@@ -1221,201 +1221,378 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 	return byte(spi.Bus.DATA.Get()), nil
 }
 
-// PWM
-const period = 0xFFFF
+// PWM is one PWM peripheral, which consists of a counter and multiple output
+// channels (that can be connected to actual pins). You can set the frequency
+// using SetPeriod, but only for all the channels in this PWM peripheral at
+// once.
+type PWM sam.TCC_Type
 
-// InitPWM initializes the PWM interface.
-func InitPWM() {
-	// turn on timer clocks used for PWM
-	sam.PM.APBCMASK.SetBits(sam.PM_APBCMASK_TCC0_ | sam.PM_APBCMASK_TCC1_ | sam.PM_APBCMASK_TCC2_)
-
-	// Use GCLK0 for TCC0/TCC1
-	sam.GCLK.CLKCTRL.Set((sam.GCLK_CLKCTRL_ID_TCC0_TCC1 << sam.GCLK_CLKCTRL_ID_Pos) |
-		(sam.GCLK_CLKCTRL_GEN_GCLK0 << sam.GCLK_CLKCTRL_GEN_Pos) |
-		sam.GCLK_CLKCTRL_CLKEN)
-	for sam.GCLK.STATUS.HasBits(sam.GCLK_STATUS_SYNCBUSY) {
-	}
-
-	// Use GCLK0 for TCC2/TC3
-	sam.GCLK.CLKCTRL.Set((sam.GCLK_CLKCTRL_ID_TCC2_TC3 << sam.GCLK_CLKCTRL_ID_Pos) |
-		(sam.GCLK_CLKCTRL_GEN_GCLK0 << sam.GCLK_CLKCTRL_GEN_Pos) |
-		sam.GCLK_CLKCTRL_CLKEN)
-	for sam.GCLK.STATUS.HasBits(sam.GCLK_STATUS_SYNCBUSY) {
-	}
+// PWMChannel is a single channel out of a PWM peripheral. You can control the
+// duty cycle for this channel, but not the frequency.
+type PWMChannel struct {
+	*PWM
+	Channel uint8
 }
 
-// Configure configures a PWM pin for output.
-func (pwm PWM) Configure() error {
-	// figure out which TCCX timer for this pin
-	timer := pwm.getTimer()
-	if timer == nil {
-		return ErrInvalidOutputPin
+// The SAM D21 has three TCC peripherals, which have PWM as one feature.
+var (
+	PWM0 = (*PWM)(sam.TCC0)
+	PWM1 = (*PWM)(sam.TCC1)
+	PWM2 = (*PWM)(sam.TCC2)
+)
+
+//go:inline
+func (pwm *PWM) timer() *sam.TCC_Type {
+	return (*sam.TCC_Type)(pwm)
+}
+
+// Configure enables and configures this PWM.
+func (pwm *PWM) Configure(config PWMConfig) error {
+	// Enable the clock source for this timer.
+	switch pwm.timer() {
+	case sam.TCC0:
+		sam.PM.APBCMASK.SetBits(sam.PM_APBCMASK_TCC0_)
+		// Use GCLK0 for TCC0/TCC1
+		sam.GCLK.CLKCTRL.Set((sam.GCLK_CLKCTRL_ID_TCC0_TCC1 << sam.GCLK_CLKCTRL_ID_Pos) |
+			(sam.GCLK_CLKCTRL_GEN_GCLK0 << sam.GCLK_CLKCTRL_GEN_Pos) |
+			sam.GCLK_CLKCTRL_CLKEN)
+		for sam.GCLK.STATUS.HasBits(sam.GCLK_STATUS_SYNCBUSY) {
+		}
+	case sam.TCC1:
+		sam.PM.APBCMASK.SetBits(sam.PM_APBCMASK_TCC1_)
+		// Use GCLK0 for TCC0/TCC1
+		sam.GCLK.CLKCTRL.Set((sam.GCLK_CLKCTRL_ID_TCC0_TCC1 << sam.GCLK_CLKCTRL_ID_Pos) |
+			(sam.GCLK_CLKCTRL_GEN_GCLK0 << sam.GCLK_CLKCTRL_GEN_Pos) |
+			sam.GCLK_CLKCTRL_CLKEN)
+		for sam.GCLK.STATUS.HasBits(sam.GCLK_STATUS_SYNCBUSY) {
+		}
+	case sam.TCC2:
+		sam.PM.APBCMASK.SetBits(sam.PM_APBCMASK_TCC2_)
+		// Use GCLK0 for TCC2/TC3
+		sam.GCLK.CLKCTRL.Set((sam.GCLK_CLKCTRL_ID_TCC2_TC3 << sam.GCLK_CLKCTRL_ID_Pos) |
+			(sam.GCLK_CLKCTRL_GEN_GCLK0 << sam.GCLK_CLKCTRL_GEN_Pos) |
+			sam.GCLK_CLKCTRL_CLKEN)
+		for sam.GCLK.STATUS.HasBits(sam.GCLK_STATUS_SYNCBUSY) {
+		}
 	}
 
-	// disable timer
-	timer.CTRLA.ClearBits(sam.TCC_CTRLA_ENABLE)
-	// Wait for synchronization
-	for timer.SYNCBUSY.HasBits(sam.TCC_SYNCBUSY_ENABLE) {
-	}
+	// Disable timer (if it was enabled). This is necessary because
+	// pwm.setPeriod may want to change the prescaler bits in CTRLA, which is
+	// only allowed when the TCC is disabled.
+	pwm.timer().CTRLA.ClearBits(sam.TCC_CTRLA_ENABLE)
 
 	// Use "Normal PWM" (single-slope PWM)
-	timer.WAVE.SetBits(sam.TCC_WAVE_WAVEGEN_NPWM)
-	// Wait for synchronization
-	for timer.SYNCBUSY.HasBits(sam.TCC_SYNCBUSY_WAVE) {
+	pwm.timer().WAVE.Set(sam.TCC_WAVE_WAVEGEN_NPWM)
+
+	// Wait for synchronization of all changed registers.
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 
-	// Set the period (the number to count to (TOP) before resetting timer)
-	//TCC0->PER.reg = period;
-	timer.PER.Set(period)
-	// Wait for synchronization
-	for timer.SYNCBUSY.HasBits(sam.TCC_SYNCBUSY_PER) {
+	// Set the period and prescaler.
+	err := pwm.setPeriod(config.Period, true)
+
+	// Enable the timer.
+	pwm.timer().CTRLA.SetBits(sam.TCC_CTRLA_ENABLE)
+
+	// Wait for synchronization of all changed registers.
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 
-	// Set pin as output
-	sam.PORT.DIRSET0.Set(1 << uint8(pwm.Pin))
-	// Set pin to low
-	sam.PORT.OUTCLR0.Set(1 << uint8(pwm.Pin))
+	// Return any error that might have occured in the pwm.setPeriod call.
+	return err
+}
 
-	// Enable the port multiplexer for pin
-	pwm.setPinCfg(sam.PORT_PINCFG0_PMUXEN)
-
-	// Connect TCCX timer to pin.
-	// we normally use the F channel aka ALT
-	pwmConfig := PinPWMAlt
-
-	// in the case of PA6 or PA7 we have to use E channel
-	if pwm.Pin == 6 || pwm.Pin == 7 {
-		pwmConfig = PinPWM
+// SetPeriod updates the period of this PWM peripheral.
+// To set a particular frequency, use the following formula:
+//
+//     period = 1e9 / frequency
+//
+// If you use a period of 0, a period that works well for LEDs will be picked.
+//
+// SetPeriod will not change the prescaler, but also won't change the current
+// value in any of the channels. This means that you may need to update the
+// value for the particular channel.
+//
+// Note that you cannot pick any arbitrary period after the PWM peripheral has
+// been configured. If you want to switch between frequencies, pick the lowest
+// frequency (longest period) once when calling Configure and adjust the
+// frequency here as needed.
+func (pwm *PWM) SetPeriod(period uint64) error {
+	err := pwm.setPeriod(period, false)
+	if err == nil {
+		if pwm.Counter() >= pwm.Top() {
+			// When setting the timer to a shorter period, there is a chance
+			// that it passes the counter value and thus goes all the way to MAX
+			// before wrapping back to zero.
+			// To avoid this, reset the counter back to 0.
+			pwm.timer().COUNT.Set(0)
+		}
 	}
+	return err
+}
 
-	if pwm.Pin&1 > 0 {
-		// odd pin, so save the even pins
-		val := pwm.getPMux() & sam.PORT_PMUX0_PMUXE_Msk
-		pwm.setPMux(val | uint8(pwmConfig<<sam.PORT_PMUX0_PMUXO_Pos))
+// setPeriod sets the period of this PWM, possibly updating the prescaler as
+// well. The prescaler can only modified when the PWM is disabled, that is, in
+// the Configure function.
+func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
+	var top uint64
+	if period == 0 {
+		// Make sure the TOP value is at 0xffff (enough for a 16-bit timer).
+		top = 0xffff
 	} else {
-		// even pin, so save the odd pins
-		val := pwm.getPMux() & sam.PORT_PMUX0_PMUXO_Msk
-		pwm.setPMux(val | uint8(pwmConfig<<sam.PORT_PMUX0_PMUXE_Pos))
+		// The formula below calculates the following formula, optimized:
+		//     period * (48e6 / 1e9)
+		// This assumes that the chip is running at the (default) 48MHz speed.
+		top = period * 6 / 125
+	}
+
+	maxTop := uint64(0xffffff)
+	if pwm.timer() == sam.TCC2 {
+		// TCC2 is a 16-bit timer, not a 24-bit timer.
+		maxTop = 0xffff
+	}
+
+	if updatePrescaler {
+		// This function was called during Configure(), with the timer disabled.
+		// Note that updating the prescaler can only happen while the peripheral
+		// is disabled.
+		var prescaler uint32
+		switch {
+		case top <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV1
+		case top/2 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV2
+			top = top / 2
+		case top/4 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV4
+			top = top / 4
+		case top/8 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV8
+			top = top / 8
+		case top/16 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV16
+			top = top / 16
+		case top/64 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV64
+			top = top / 64
+		case top/256 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV256
+			top = top / 256
+		case top/1024 <= maxTop:
+			prescaler = sam.TCC_CTRLA_PRESCALER_DIV1024
+			top = top / 1024
+		default:
+			return ErrPWMPeriodTooLong
+		}
+		pwm.timer().CTRLA.Set((pwm.timer().CTRLA.Get() &^ sam.TCC_CTRLA_PRESCALER_Msk) | (prescaler << sam.TCC_CTRLA_PRESCALER_Pos))
+	} else {
+		// Do not update the prescaler, but use the already-configured
+		// prescaler. This is the normal SetPeriod case, where the prescaler
+		// must not be changed.
+		prescaler := (pwm.timer().CTRLA.Get() & sam.TCC_CTRLA_PRESCALER_Msk) >> sam.TCC_CTRLA_PRESCALER_Pos
+		switch prescaler {
+		case sam.TCC_CTRLA_PRESCALER_DIV1:
+			top /= 1 // no-op
+		case sam.TCC_CTRLA_PRESCALER_DIV2:
+			top /= 2
+		case sam.TCC_CTRLA_PRESCALER_DIV4:
+			top /= 4
+		case sam.TCC_CTRLA_PRESCALER_DIV8:
+			top /= 8
+		case sam.TCC_CTRLA_PRESCALER_DIV16:
+			top /= 16
+		case sam.TCC_CTRLA_PRESCALER_DIV64:
+			top /= 64
+		case sam.TCC_CTRLA_PRESCALER_DIV256:
+			top /= 256
+		case sam.TCC_CTRLA_PRESCALER_DIV1024:
+			top /= 1024
+		default:
+			// unreachable
+		}
+		if top > maxTop {
+			return ErrPWMPeriodTooLong
+		}
+	}
+
+	// Set the period (the counter top).
+	pwm.timer().PER.Set(uint32(top) - 1)
+
+	// Wait for synchronization of CTRLA.PRESCALER and PER registers.
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 
 	return nil
 }
 
-// Set turns on the duty cycle for a PWM pin using the provided value.
-func (pwm PWM) Set(value uint16) {
-	// figure out which TCCX timer for this pin
-	timer := pwm.getTimer()
-	if timer == nil {
-		// The Configure call above cannot have succeeded, so simply ignore this
-		// error.
-		return
+// Top returns the current counter top, for use in duty cycle calculation. It
+// will only change with a call to Configure or SetPeriod, otherwise it is
+// constant.
+//
+// The value returned here is hardware dependent. In general, it's best to treat
+// it as an opaque value that can be divided by some number and passed to
+// PWMChannel.Set (see PWMChannel.Set for more information).
+func (pwm *PWM) Top() uint32 {
+	return pwm.timer().PER.Get() + 1
+}
+
+// Counter returns the current counter value of the timer in this PWM
+// peripheral. It may be useful for debugging.
+func (pwm *PWM) Counter() uint32 {
+	pwm.timer().CTRLBSET.Set(sam.TCC_CTRLBSET_CMD_READSYNC << sam.TCC_CTRLBSET_CMD_Pos)
+	for pwm.timer().SYNCBUSY.Get() != 0 {
+	}
+	return pwm.timer().COUNT.Get()
+}
+
+// Some constans to make pinTimerMapping below easier to read.
+const (
+	pinTCC0     = 1
+	pinTCC1     = 2
+	pinTCC2     = 3
+	pinTimerCh0 = 0 << 3
+	pinTimerCh2 = 1 << 3
+	pinTCC0Ch0  = pinTCC0 | pinTimerCh0
+	pinTCC0Ch2  = pinTCC0 | pinTimerCh2
+	pinTCC1Ch0  = pinTCC1 | pinTimerCh0
+	pinTCC1Ch2  = pinTCC1 | pinTimerCh2
+	pinTCC2Ch0  = pinTCC2 | pinTimerCh0
+)
+
+// Mapping from pin number to TCC peripheral and channel using a special
+// encoding. Note that only TCC0-TCC2 are included, not TC3 and up.
+// Every byte is split in two nibbles where the low nibble describes PinPWM and
+// the high nibble describes PinPWMAlt. Within a nibble, there is one bit that
+// indicates Ch0/Ch1 or Ch2/Ch3, and three other bits that contain the TCC
+// peripheral number plus one (to distinguish between TCC0Ch0 and 0).
+//
+// The encoding can be so compact because all pins are configured in pairs, so
+// if you know PA00 you can infer the configuration of PA01. And only channel 0
+// or 2 need to be included (taking up just one bit), because channel 0 and 2
+// are only ever used on odd pins and channel 1 and 3 on even pins, again using
+// the pin pair pattern to reduce the amount of information needed to be stored.
+//
+// Datasheet: https://cdn.sparkfun.com/datasheets/Dev/Arduino/Boards/Atmel-42181-SAM-D21_Datasheet.pdf
+var pinTimerMapping = [...]uint8{
+	// page 21
+	PA00 / 2: pinTCC2Ch0 | 0,
+	PA04 / 2: pinTCC0Ch0 | 0,
+	PA06 / 2: pinTCC1Ch0 | 0,
+	PA08 / 2: pinTCC0Ch0 | pinTCC1Ch2<<4,
+	PA10 / 2: pinTCC1Ch0 | pinTCC0Ch2<<4,
+	// page 22
+	PB10 / 2: 0 | pinTCC0Ch0<<4,
+	PB12 / 2: 0 | pinTCC0Ch2<<4,
+	PA12 / 2: pinTCC2Ch0 | pinTCC0Ch2<<4,
+	PA14 / 2: 0 | pinTCC0Ch0<<4,
+	PA16 / 2: pinTCC2Ch0 | pinTCC0Ch2<<4,
+	PA18 / 2: 0 | pinTCC0Ch2<<4,
+	PB16 / 2: 0 | pinTCC0Ch0<<4,
+	PA20 / 2: 0 | pinTCC0Ch2<<4,
+	PA22 / 2: 0 | pinTCC0Ch0<<4,
+	PA24 / 2: 0 | pinTCC1Ch2<<4,
+	// page 23
+	PA30 / 2: 0 | pinTCC1Ch0<<4,
+	PB30 / 2: pinTCC0Ch0 | pinTCC1Ch2<<4,
+}
+
+// findPinPadMapping returns the pin mode (PinPWM or PinPWMAlt) and the channel
+// number for a given timer and pin. A zero PinMode is returned if no mapping
+// could be found.
+func findPinTimerMapping(timer uint8, pin Pin) (PinMode, uint8) {
+	mapping := pinTimerMapping[pin/2]
+	// evenChannel below indicates the channel 0 or 2, for the even part of the
+	// pin pair. The next pin will also have the next channel (1 or 3).
+	if mapping&0x07 == timer+1 {
+		// PWM output is on peripheral function E.
+		evenChannel := ((mapping >> 3) & 1) * 2
+		return PinPWM, evenChannel + uint8(pin&1)
+	}
+	if (mapping&0x70)>>4 == timer+1 {
+		// PWM output is on peripheral function F.
+		evenChannel := ((mapping >> 7) & 1) * 2
+		return PinPWMAlt, evenChannel + uint8(pin&1)
+	}
+	return 0, 0
+}
+
+// Channel returns a PWM channel for the given pin. Note that one channel may be
+// shared between multiple pins, and so will have the same duty cycle. If this
+// is not desirable, look for a different PWM or consider using a different pin.
+func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
+	var pinMode PinMode
+	var channel uint8
+	switch pwm.timer() {
+	case sam.TCC0:
+		pinMode, channel = findPinTimerMapping(0, pin)
+	case sam.TCC1:
+		pinMode, channel = findPinTimerMapping(1, pin)
+	case sam.TCC2:
+		pinMode, channel = findPinTimerMapping(2, pin)
 	}
 
-	// disable output
-	timer.CTRLA.ClearBits(sam.TCC_CTRLA_ENABLE)
-
-	// Wait for synchronization
-	for timer.SYNCBUSY.HasBits(sam.TCC_SYNCBUSY_ENABLE) {
+	if pinMode == 0 {
+		// No pin could be found.
+		return PWMChannel{}, ErrInvalidOutputPin
 	}
 
+	// Enable the port multiplexer for pin
+	pin.setPinCfg(sam.PORT_PINCFG0_PMUXEN)
+
+	if pin&1 > 0 {
+		// odd pin, so save the even pins
+		val := pin.getPMux() & sam.PORT_PMUX0_PMUXE_Msk
+		pin.setPMux(val | uint8(pinMode<<sam.PORT_PMUX0_PMUXO_Pos))
+	} else {
+		// even pin, so save the odd pins
+		val := pin.getPMux() & sam.PORT_PMUX0_PMUXO_Msk
+		pin.setPMux(val | uint8(pinMode<<sam.PORT_PMUX0_PMUXE_Pos))
+	}
+	return PWMChannel{pwm, channel}, nil
+}
+
+// SetInverting sets whether to invert the output of this channel.
+// Without inverting, a 25% duty cycle would mean the output is high for 25% of
+// the time and low for the rest. Inverting flips the output as if a NOT gate
+// was placed at the output, meaning that the output would be 25% low and 75%
+// high with a duty cycle of 25%.
+func (ch PWMChannel) SetInverting(inverting bool) {
+	if inverting {
+		ch.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + ch.Channel))
+	} else {
+		ch.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + ch.Channel))
+	}
+
+	// Wait for synchronization of the WAVE register.
+	for ch.timer().SYNCBUSY.Get() != 0 {
+	}
+}
+
+// Set updates the channel value. This is used to control the channel duty
+// cycle. For example, to set it to a 25% duty cycle, use:
+//
+//     ch.Set(ch.Top() / 4)
+//
+// ch.Set(0) will set the output to low and ch.Set(ch.Top()) will set the output
+// to high, assuming the output isn't inverted.
+func (ch PWMChannel) Set(value uint32) {
 	// Set PWM signal to output duty cycle
-	pwm.setChannel(timer, uint32(value))
-
-	// Wait for synchronization on all channels
-	for timer.SYNCBUSY.HasBits(sam.TCC_SYNCBUSY_CC0 |
-		sam.TCC_SYNCBUSY_CC1 |
-		sam.TCC_SYNCBUSY_CC2 |
-		sam.TCC_SYNCBUSY_CC3) {
-	}
-
-	// enable
-	timer.CTRLA.SetBits(sam.TCC_CTRLA_ENABLE)
-	// Wait for synchronization
-	for timer.SYNCBUSY.HasBits(sam.TCC_SYNCBUSY_ENABLE) {
-	}
-}
-
-// getPMux returns the value for the correct PMUX register for this pin.
-func (pwm PWM) getPMux() uint8 {
-	return pwm.Pin.getPMux()
-}
-
-// setPMux sets the value for the correct PMUX register for this pin.
-func (pwm PWM) setPMux(val uint8) {
-	pwm.Pin.setPMux(val)
-}
-
-// getPinCfg returns the value for the correct PINCFG register for this pin.
-func (pwm PWM) getPinCfg() uint8 {
-	return pwm.Pin.getPinCfg()
-}
-
-// setPinCfg sets the value for the correct PINCFG register for this pin.
-func (pwm PWM) setPinCfg(val uint8) {
-	pwm.Pin.setPinCfg(val)
-}
-
-// getTimer returns the timer to be used for PWM on this pin
-func (pwm PWM) getTimer() *sam.TCC_Type {
-	switch pwm.Pin {
-	case 6:
-		return sam.TCC1
-	case 7:
-		return sam.TCC1
-	case 8:
-		return sam.TCC1
-	case 9:
-		return sam.TCC1
-	case 14:
-		return sam.TCC0
-	case 15:
-		return sam.TCC0
-	case 16:
-		return sam.TCC0
-	case 17:
-		return sam.TCC0
-	case 18:
-		return sam.TCC0
-	case 19:
-		return sam.TCC0
-	case 20:
-		return sam.TCC0
-	case 21:
-		return sam.TCC0
+	switch ch.Channel {
+	case 0:
+		ch.timer().CC0.Set(value)
+	case 1:
+		ch.timer().CC1.Set(value)
+	case 2:
+		ch.timer().CC2.Set(value)
+	case 3:
+		ch.timer().CC3.Set(value)
 	default:
-		return nil // not supported on this pin
+		// invalid PWMChannel struct, ignore.
 	}
-}
 
-// setChannel sets the value for the correct channel for PWM on this pin
-func (pwm PWM) setChannel(timer *sam.TCC_Type, val uint32) {
-	switch pwm.Pin {
-	case 6:
-		timer.CC0.Set(val)
-	case 7:
-		timer.CC1.Set(val)
-	case 8:
-		timer.CC0.Set(val)
-	case 9:
-		timer.CC1.Set(val)
-	case 14:
-		timer.CC0.Set(val)
-	case 15:
-		timer.CC1.Set(val)
-	case 16:
-		timer.CC2.Set(val)
-	case 17:
-		timer.CC3.Set(val)
-	case 18:
-		timer.CC2.Set(val)
-	case 19:
-		timer.CC3.Set(val)
-	case 20:
-		timer.CC2.Set(val)
-	case 21:
-		timer.CC3.Set(val)
-	default:
-		return // not supported on this pin
+	// Wait for synchronization on all channels (or anything in this peripheral,
+	// really).
+	for ch.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 

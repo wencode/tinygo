@@ -1,64 +1,86 @@
 package main
 
+// This example demonstrates some features of the PWM support.
+
 import (
 	"machine"
 	"time"
 )
 
-// This example assumes that an RGB LED is connected to pins 3, 5 and 6 on an Arduino.
-// Change the values below to use different pins.
-const (
-	redPin   = machine.D4
-	greenPin = machine.D5
-	bluePin  = machine.D6
+var (
+	// Configuration on an Adafruit Circuit Playground Express.
+	pwm  = machine.PWM1
+	pinA = machine.A2
+	pinB = machine.A3
+
+	// Configuration on an Arduino Uno.
+	//pwm  = machine.Timer2
+	//pinA = machine.PB3 // pin 11 on the Uno
+	//pinB = machine.PD3 // pin 3 on the Uno
 )
 
-// cycleColor is just a placeholder until math/rand or some equivalent is working.
-func cycleColor(color uint8) uint8 {
-	if color < 10 {
-		return color + 1
-	} else if color < 200 {
-		return color + 10
-	} else {
-		return 0
-	}
-}
+const delayBetweenPeriods = time.Second * 5
 
 func main() {
-	machine.InitPWM()
+	// Delay a bit on startup to easily catch the first messages.
+	time.Sleep(time.Second * 2)
 
-	red := machine.PWM{redPin}
-	err := red.Configure()
-	checkError(err, "failed to configure red pin")
+	// Configure the PWM with the given period.
+	err := pwm.Configure(machine.PWMConfig{
+		Period: 16384e3, // 16.384ms
+	})
+	if err != nil {
+		println("failed to configure PWM")
+		return
+	}
 
-	green := machine.PWM{greenPin}
-	err = green.Configure()
-	checkError(err, "failed to configure green pin")
+	// The top value is the highest value that can be passed to PWMChannel.Set.
+	// It is usually an even number.
+	println("top:", pwm.Top())
 
-	blue := machine.PWM{bluePin}
-	err = blue.Configure()
-	checkError(err, "failed to configure blue pin")
+	// Configure the two channels we'll use as outputs.
+	channelA, err := pwm.Channel(pinA)
+	if err != nil {
+		println("failed to configure channel A")
+		return
+	}
+	channelB, err := pwm.Channel(pinB)
+	if err != nil {
+		println("failed to configure channel B")
+		return
+	}
 
-	var rc uint8
-	var gc uint8 = 20
-	var bc uint8 = 30
+	// Invert one of the channels to demonstrate output polarity.
+	channelB.SetInverting(true)
+
+	// Test out various frequencies below, including some edge cases.
+
+	println("running at 0% duty cycle")
+	channelA.Set(0)
+	channelB.Set(0)
+	time.Sleep(delayBetweenPeriods)
+
+	println("running at 1")
+	channelA.Set(1)
+	channelB.Set(1)
+	time.Sleep(delayBetweenPeriods)
+
+	println("running at 25% duty cycle")
+	channelA.Set(pwm.Top() / 4)
+	channelB.Set(pwm.Top() / 4)
+	time.Sleep(delayBetweenPeriods)
+
+	println("running at top-1")
+	channelA.Set(pwm.Top() - 1)
+	channelB.Set(pwm.Top() - 1)
+	time.Sleep(delayBetweenPeriods)
+
+	println("running at 100% duty cycle")
+	channelA.Set(pwm.Top())
+	channelB.Set(pwm.Top())
+	time.Sleep(delayBetweenPeriods)
 
 	for {
-		rc = cycleColor(rc)
-		gc = cycleColor(gc)
-		bc = cycleColor(bc)
-
-		red.Set(uint16(rc) << 8)
-		green.Set(uint16(gc) << 8)
-		blue.Set(uint16(bc) << 8)
-
-		time.Sleep(time.Millisecond * 500)
-	}
-}
-
-func checkError(err error, msg string) {
-	if err != nil {
-		print(msg, ": ", err.Error())
-		println()
+		time.Sleep(time.Second)
 	}
 }
