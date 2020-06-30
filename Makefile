@@ -99,6 +99,10 @@ CLANG_LIBS = $(START_GROUP) -lclangAnalysis -lclangARCMigrate -lclangAST -lclang
 
 LLD_LIBS = $(START_GROUP) -llldCOFF -llldCommon -llldCore -llldDriver -llldELF -llldMachO -llldMinGW -llldReaderWriter -llldWasm -llldYAML $(END_GROUP)
 
+# These build targets appear to be the only ones necessary to build all TinyGo
+# dependencies. Only building a subset significantly speeds up rebuilding LLVM.
+NINJA_BUILD_TARGETS = lib/libclang.a lib/libLLVMRuntimeDyld.a lib/libLLVMExecutionEngine.a lib/libLLVMInterpreter.a lib/libLLVMCoroutines.a lib/libLLVMCoverage.a lib/libLLVMMCJIT.a lib/libclangCodeGen.a lib/libclangDynamicASTMatchers.a lib/libclangFrontendTool.a lib/libclangHandleCXX.a lib/libclangHandleLLVM.a lib/libclangRewriteFrontend.a lib/libclangStaticAnalyzerCheckers.a lib/libclangStaticAnalyzerCore.a lib/libclangStaticAnalyzerFrontend.a lib/libclangToolingASTDiff.a lib/liblldCOFF.a lib/liblldDriver.a lib/liblldELF.a lib/liblldMinGW.a lib/liblldWasm.a llvm-config clang llvm-ar llvm-nm
+
 
 # For static linking.
 ifneq ("$(wildcard $(LLVM_BUILDDIR)/bin/llvm-config*)","")
@@ -158,7 +162,7 @@ $(LLVM_BUILDDIR)/build.ninja: llvm-source
 
 # Build LLVM.
 $(LLVM_BUILDDIR): $(LLVM_BUILDDIR)/build.ninja
-	cd $(LLVM_BUILDDIR); ninja
+	cd $(LLVM_BUILDDIR); ninja $(NINJA_BUILD_TARGETS)
 
 
 # Build wasi-libc sysroot

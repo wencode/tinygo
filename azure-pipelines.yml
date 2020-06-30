@@ -17,7 +17,7 @@ jobs:
     - task: CacheBeta@0
       displayName: Cache LLVM source
       inputs:
-        key: llvm-source-10-windows-v0
+        key: llvm-source-10-windows-v1
         path: llvm-project
     - task: Bash@3
       displayName: Download LLVM source
@@ -27,7 +27,7 @@ jobs:
     - task: CacheBeta@0
       displayName: Cache LLVM build
       inputs:
-        key: llvm-build-10-windows-v0
+        key: llvm-build-10-windows-v1
         path: llvm-build
     - task: Bash@3
       displayName: Build LLVM
