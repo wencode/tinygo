@@ -1466,13 +1466,6 @@ const (
 // once.
 type PWM sam.TCC_Type
 
-// PWMChannel is a single channel out of a PWM peripheral. You can control the
-// duty cycle for this channel, but not the frequency.
-type PWMChannel struct {
-	*PWM
-	Channel uint8
-}
-
 //go:inline
 func (pwm *PWM) timer() *sam.TCC_Type {
 	return (*sam.TCC_Type)(pwm)
@@ -1629,7 +1622,7 @@ func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 //
 // The value returned here is hardware dependent. In general, it's best to treat
 // it as an opaque value that can be divided by some number and passed to
-// PWMChannel.Set (see PWMChannel.Set for more information).
+// pwm.Set (see pwm.Set for more information).
 func (pwm *PWM) Top() uint32 {
 	return pwm.timer().PER.Get() + 1
 }
@@ -1740,12 +1733,12 @@ func findPinTimerMapping(timer uint8, pin Pin) (PinMode, uint8) {
 // Channel returns a PWM channel for the given pin. Note that one channel may be
 // shared between multiple pins, and so will have the same duty cycle. If this
 // is not desirable, look for a different PWM or consider using a different pin.
-func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
+func (pwm *PWM) Channel(pin Pin) (uint8, error) {
 	pinMode, woOutput := findPinTimerMapping(pwm.timerNum(), pin)
 
 	if pinMode == 0 {
 		// No pin could be found.
-		return PWMChannel{}, ErrInvalidOutputPin
+		return 0, ErrInvalidOutputPin
 	}
 
 	// Convert from waveform output to channel, assuming WEXCTRL.OTMX equals 0.
@@ -1778,7 +1771,7 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 		pin.setPMux(val | uint8(pinMode<<sam.PORT_GROUP_PMUX_PMUXE_Pos))
 	}
 
-	return PWMChannel{pwm, channel}, nil
+	return channel, nil
 }
 
 // SetInverting sets whether to invert the output of this channel.
@@ -1786,30 +1779,31 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 // the time and low for the rest. Inverting flips the output as if a NOT gate
 // was placed at the output, meaning that the output would be 25% low and 75%
 // high with a duty cycle of 25%.
-func (ch PWMChannel) SetInverting(inverting bool) {
+func (pwm *PWM) SetInverting(channel uint8, inverting bool) {
 	if inverting {
-		ch.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + ch.Channel))
+		pwm.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
 	} else {
-		ch.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + ch.Channel))
+		pwm.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
 	}
 
 	// Wait for synchronization of the WAVE register.
-	for ch.timer().SYNCBUSY.Get() != 0 {
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 
 // Set updates the channel value. This is used to control the channel duty
-// cycle. For example, to set it to a 25% duty cycle, use:
+// cycle, in other words the fraction of time the channel output is high (or low
+// when inverted). For example, to set it to a 25% duty cycle, use:
 //
-//     ch.Set(ch.Top() / 4)
+//     pwm.Set(channel, pwm.Top() / 4)
 //
-// ch.Set(0) will set the output to low and ch.Set(ch.Top()) will set the output
-// to high, assuming the output isn't inverted.
-func (ch PWMChannel) Set(value uint32) {
+// pwm.Set(channel, 0) will set the output to low and pwm.Set(channel,
+// pwm.Top()) will set the output to high, assuming the output isn't inverted.
+func (pwm *PWM) Set(channel uint8, value uint32) {
 	// Update CCBUF, which provides double buffering. The update is applied on
 	// the next cycle.
-	ch.timer().CCBUF[ch.Channel].Set(value)
-	for ch.timer().SYNCBUSY.Get() != 0 {
+	pwm.timer().CCBUF[channel].Set(value)
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 

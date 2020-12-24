@@ -51,33 +51,33 @@ func main() {
 	}
 
 	// Invert one of the channels to demonstrate output polarity.
-	channelB.SetInverting(true)
+	pwm.SetInverting(channelB, true)
 
 	// Test out various frequencies below, including some edge cases.
 
 	println("running at 0% duty cycle")
-	channelA.Set(0)
-	channelB.Set(0)
+	pwm.Set(channelA, 0)
+	pwm.Set(channelB, 0)
 	time.Sleep(delayBetweenPeriods)
 
 	println("running at 1")
-	channelA.Set(1)
-	channelB.Set(1)
+	pwm.Set(channelA, 1)
+	pwm.Set(channelB, 1)
 	time.Sleep(delayBetweenPeriods)
 
 	println("running at 25% duty cycle")
-	channelA.Set(pwm.Top() / 4)
-	channelB.Set(pwm.Top() / 4)
+	pwm.Set(channelA, pwm.Top()/4)
+	pwm.Set(channelB, pwm.Top()/4)
 	time.Sleep(delayBetweenPeriods)
 
 	println("running at top-1")
-	channelA.Set(pwm.Top() - 1)
-	channelB.Set(pwm.Top() - 1)
+	pwm.Set(channelA, pwm.Top()-1)
+	pwm.Set(channelB, pwm.Top()-1)
 	time.Sleep(delayBetweenPeriods)
 
 	println("running at 100% duty cycle")
-	channelA.Set(pwm.Top())
-	channelB.Set(pwm.Top())
+	pwm.Set(channelA, pwm.Top())
+	pwm.Set(channelB, pwm.Top())
 	time.Sleep(delayBetweenPeriods)
 
 	for {

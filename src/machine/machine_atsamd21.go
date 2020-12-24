@@ -1227,13 +1227,6 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 // once.
 type PWM sam.TCC_Type
 
-// PWMChannel is a single channel out of a PWM peripheral. You can control the
-// duty cycle for this channel, but not the frequency.
-type PWMChannel struct {
-	*PWM
-	Channel uint8
-}
-
 // The SAM D21 has three TCC peripherals, which have PWM as one feature.
 var (
 	PWM0 = (*PWM)(sam.TCC0)
@@ -1430,8 +1423,8 @@ func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 // constant.
 //
 // The value returned here is hardware dependent. In general, it's best to treat
-// it as an opaque value that can be divided by some number and passed to
-// PWMChannel.Set (see PWMChannel.Set for more information).
+// it as an opaque value that can be divided by some number and passed to Set
+// (see Set documentation for more information).
 func (pwm *PWM) Top() uint32 {
 	return pwm.timer().PER.Get() + 1
 }
@@ -1519,7 +1512,7 @@ func findPinTimerMapping(timer uint8, pin Pin) (PinMode, uint8) {
 // Channel returns a PWM channel for the given pin. Note that one channel may be
 // shared between multiple pins, and so will have the same duty cycle. If this
 // is not desirable, look for a different PWM or consider using a different pin.
-func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
+func (pwm *PWM) Channel(pin Pin) (uint8, error) {
 	var pinMode PinMode
 	var channel uint8
 	switch pwm.timer() {
@@ -1533,7 +1526,7 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 
 	if pinMode == 0 {
 		// No pin could be found.
-		return PWMChannel{}, ErrInvalidOutputPin
+		return 0, ErrInvalidOutputPin
 	}
 
 	// Enable the port multiplexer for pin
@@ -1548,7 +1541,7 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 		val := pin.getPMux() & sam.PORT_PMUX0_PMUXO_Msk
 		pin.setPMux(val | uint8(pinMode<<sam.PORT_PMUX0_PMUXE_Pos))
 	}
-	return PWMChannel{pwm, channel}, nil
+	return channel, nil
 }
 
 // SetInverting sets whether to invert the output of this channel.
@@ -1556,43 +1549,44 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 // the time and low for the rest. Inverting flips the output as if a NOT gate
 // was placed at the output, meaning that the output would be 25% low and 75%
 // high with a duty cycle of 25%.
-func (ch PWMChannel) SetInverting(inverting bool) {
+func (pwm *PWM) SetInverting(channel uint8, inverting bool) {
 	if inverting {
-		ch.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + ch.Channel))
+		pwm.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
 	} else {
-		ch.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + ch.Channel))
+		pwm.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
 	}
 
 	// Wait for synchronization of the WAVE register.
-	for ch.timer().SYNCBUSY.Get() != 0 {
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 
 // Set updates the channel value. This is used to control the channel duty
-// cycle. For example, to set it to a 25% duty cycle, use:
+// cycle, in other words the fraction of time the channel output is high (or low
+// when inverted). For example, to set it to a 25% duty cycle, use:
 //
-//     ch.Set(ch.Top() / 4)
+//     pwm.Set(channel, pwm.Top() / 4)
 //
-// ch.Set(0) will set the output to low and ch.Set(ch.Top()) will set the output
-// to high, assuming the output isn't inverted.
-func (ch PWMChannel) Set(value uint32) {
+// pwm.Set(channel, 0) will set the output to low and pwm.Set(channel,
+// pwm.Top()) will set the output to high, assuming the output isn't inverted.
+func (pwm *PWM) Set(channel uint8, value uint32) {
 	// Set PWM signal to output duty cycle
-	switch ch.Channel {
+	switch channel {
 	case 0:
-		ch.timer().CC0.Set(value)
+		pwm.timer().CC0.Set(value)
 	case 1:
-		ch.timer().CC1.Set(value)
+		pwm.timer().CC1.Set(value)
 	case 2:
-		ch.timer().CC2.Set(value)
+		pwm.timer().CC2.Set(value)
 	case 3:
-		ch.timer().CC3.Set(value)
+		pwm.timer().CC3.Set(value)
 	default:
 		// invalid PWMChannel struct, ignore.
 	}
 
 	// Wait for synchronization on all channels (or anything in this peripheral,
 	// really).
-	for ch.timer().SYNCBUSY.Get() != 0 {
+	for pwm.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 

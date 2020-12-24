@@ -138,13 +138,6 @@ type PWM struct {
 	channelValues [4]volatile.Register16
 }
 
-// PWMChannel is a single channel out of a PWM peripheral. You can control the
-// duty cycle for this channel, but not the frequency.
-type PWMChannel struct {
-	*PWM
-	Channel uint8
-}
-
 // Configure enables and configures this PWM.
 // On the nRF52 series, the maximum period is around 0.26s.
 func (pwm *PWM) Configure(config PWMConfig) error {
@@ -187,11 +180,11 @@ func (pwm *PWM) Configure(config PWMConfig) error {
 // been configured. If you want to switch between frequencies, pick the lowest
 // frequency (longest period) once when calling Configure and adjust the
 // frequency here as needed.
-func (pwm PWM) SetPeriod(period uint64) error {
+func (pwm *PWM) SetPeriod(period uint64) error {
 	return pwm.setPeriod(period, false)
 }
 
-func (pwm PWM) setPeriod(period uint64, updatePrescaler bool) error {
+func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 	const maxTop = 0x7fff // 15 bits counter
 
 	// The top value is the number of PWM ticks a PWM period takes. It is
@@ -280,13 +273,13 @@ func (pwm PWM) setPeriod(period uint64, updatePrescaler bool) error {
 //
 // The value returned here is hardware dependent. In general, it's best to treat
 // it as an opaque value that can be divided by some number and passed to
-// PWMChannel.Set (see PWMChannel.Set for more information).
+// pwm.Set (see pwm.Set for more information).
 func (pwm *PWM) Top() uint32 {
 	return pwm.PWM.COUNTERTOP.Get()
 }
 
 // Channel returns a PWM channel for the given pin.
-func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
+func (pwm *PWM) Channel(pin Pin) (uint8, error) {
 	config := uint32(pin)
 	for ch := uint8(0); ch < 4; ch++ {
 		channelConfig := pwm.PWM.PSEL.OUT[ch].Get()
@@ -297,15 +290,15 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 			pin.Configure(PinConfig{Mode: PinOutput})
 			// Set channel to zero and non-inverting.
 			pwm.channelValues[ch].Set(0x8000)
-			return PWMChannel{pwm, ch}, nil
+			return ch, nil
 		} else if channelConfig == config {
 			// This channel is already configured for this pin.
-			return PWMChannel{pwm, ch}, nil
+			return ch, nil
 		}
 	}
 
 	// All four pins are already in use with other pins.
-	return PWMChannel{}, ErrInvalidOutputPin
+	return 0, ErrInvalidOutputPin
 }
 
 // SetInverting sets whether to invert the output of this channel.
@@ -313,8 +306,8 @@ func (pwm *PWM) Channel(pin Pin) (PWMChannel, error) {
 // the time and low for the rest. Inverting flips the output as if a NOT gate
 // was placed at the output, meaning that the output would be 25% low and 75%
 // high with a duty cycle of 25%.
-func (ch PWMChannel) SetInverting(inverting bool) {
-	ptr := &ch.PWM.channelValues[ch.Channel]
+func (pwm *PWM) SetInverting(channel uint8, inverting bool) {
+	ptr := &pwm.channelValues[channel]
 	if inverting {
 		ptr.Set(ptr.Get() &^ 0x8000)
 	} else {
@@ -329,11 +322,11 @@ func (ch PWMChannel) SetInverting(inverting bool) {
 //
 // ch.Set(0) will set the output to low and ch.Set(ch.Top()) will set the output
 // to high, assuming the output isn't inverted.
-func (ch PWMChannel) Set(value uint32) {
+func (pwm *PWM) Set(channel uint8, value uint32) {
 	// Update the channel value while retaining the polarity bit.
-	ptr := &ch.PWM.channelValues[ch.Channel]
+	ptr := &pwm.channelValues[channel]
 	ptr.Set(ptr.Get()&0x8000 | uint16(value)&0x7fff)
 
 	// Start the PWM, if it isn't already running.
-	ch.PWM.PWM.TASKS_SEQSTART[0].Set(1)
+	pwm.PWM.TASKS_SEQSTART[0].Set(1)
 }

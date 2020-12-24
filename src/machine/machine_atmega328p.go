@@ -30,17 +30,10 @@ type PWM struct {
 	num uint8
 }
 
-// PWMChannel is a single channel out of a PWM peripheral. You can control the
-// duty cycle for this channel, but not the frequency.
-type PWMChannel struct {
-	PWM
-	Channel uint8
-}
-
 var (
-	Timer0 = &PWM{0} // 8 bit timer for PD5 and PD6
-	Timer1 = &PWM{1} // 16 bit timer for PB1 and PB2
-	Timer2 = &PWM{2} // 8 bit timer for PB3 and PD3
+	Timer0 = PWM{0} // 8 bit timer for PD5 and PD6
+	Timer1 = PWM{1} // 16 bit timer for PB1 and PB2
+	Timer2 = PWM{2} // 8 bit timer for PB3 and PD3
 )
 
 // Configure enables and configures this PWM.
@@ -209,8 +202,8 @@ func (pwm PWM) SetPeriod(period uint64) error {
 // constant.
 //
 // The value returned here is hardware dependent. In general, it's best to treat
-// it as an opaque value that can be divided by some number and passed to
-// PWMChannel.Set (see PWMChannel.Set for more information).
+// it as an opaque value that can be divided by some number and passed to Set
+// (see Set documentation for more information).
 func (pwm PWM) Top() uint32 {
 	if pwm.num == 1 {
 		// Timer 1 has a configurable top value.
@@ -271,7 +264,7 @@ func (pwm PWM) Period() uint64 {
 }
 
 // Channel returns a PWM channel for the given pin.
-func (pwm PWM) Channel(pin Pin) (PWMChannel, error) {
+func (pwm PWM) Channel(pin Pin) (uint8, error) {
 	pin.Configure(PinConfig{Mode: PinOutput})
 	pin.Low()
 	switch pwm.num {
@@ -279,31 +272,31 @@ func (pwm PWM) Channel(pin Pin) (PWMChannel, error) {
 		switch pin {
 		case PD6: // channel A
 			avr.TCCR0A.SetBits(avr.TCCR0A_COM0A1)
-			return PWMChannel{pwm, 0}, nil
+			return 0, nil
 		case PD5: // channel B
 			avr.TCCR0A.SetBits(avr.TCCR0A_COM0B1)
-			return PWMChannel{pwm, 1}, nil
+			return 1, nil
 		}
 	case 1:
 		switch pin {
 		case PB1: // channel A
 			avr.TCCR1A.SetBits(avr.TCCR1A_COM1A1)
-			return PWMChannel{pwm, 0}, nil
+			return 0, nil
 		case PB2: // channel B
 			avr.TCCR1A.SetBits(avr.TCCR1A_COM1B1)
-			return PWMChannel{pwm, 1}, nil
+			return 1, nil
 		}
 	case 2:
 		switch pin {
 		case PB3: // channel A
 			avr.TCCR2A.SetBits(avr.TCCR2A_COM2A1)
-			return PWMChannel{pwm, 0}, nil
+			return 0, nil
 		case PD3: // channel B
 			avr.TCCR2A.SetBits(avr.TCCR2A_COM2B1)
-			return PWMChannel{pwm, 1}, nil
+			return 1, nil
 		}
 	}
-	return PWMChannel{}, ErrInvalidOutputPin
+	return 0, ErrInvalidOutputPin
 }
 
 // SetInverting sets whether to invert the output of this channel.
@@ -314,10 +307,10 @@ func (pwm PWM) Channel(pin Pin) (PWMChannel, error) {
 //
 // Note: the invert state may not be applied on the AVR until the next call to
 // ch.Set().
-func (ch PWMChannel) SetInverting(inverting bool) {
-	switch ch.PWM.num {
+func (pwm PWM) SetInverting(channel uint8, inverting bool) {
+	switch pwm.num {
 	case 0:
-		switch ch.Channel {
+		switch channel {
 		case 0: // channel A
 			if inverting {
 				avr.PORTB.SetBits(1 << 6) // PB6 high
@@ -338,7 +331,7 @@ func (ch PWMChannel) SetInverting(inverting bool) {
 	case 1:
 		// Note: the COM1A0/COM1B0 bit is not set with the configuration below.
 		// It will be set the following call to Set(), however.
-		switch ch.Channel {
+		switch channel {
 		case 0: // channel A, PB1
 			if inverting {
 				avr.PORTB.SetBits(1 << 1) // PB1 high
@@ -353,7 +346,7 @@ func (ch PWMChannel) SetInverting(inverting bool) {
 			}
 		}
 	case 2:
-		switch ch.Channel {
+		switch channel {
 		case 0: // channel A
 			if inverting {
 				avr.PORTB.SetBits(1 << 3) // PB3 high
@@ -378,15 +371,15 @@ func (ch PWMChannel) SetInverting(inverting bool) {
 // cycle, in other words the fraction of time the channel output is high (or low
 // when inverted). For example, to set it to a 25% duty cycle, use:
 //
-//     ch.Set(ch.Top() / 4)
+//     pwm.Set(channel, pwm.Top() / 4)
 //
-// ch.Set(0) will set the output to low and ch.Set(ch.Top()) will set the output
-// to high, assuming the output isn't inverted.
-func (ch PWMChannel) Set(value uint32) {
-	switch ch.PWM.num {
+// pwm.Set(channel, 0) will set the output to low and pwm.Set(channel,
+// pwm.Top()) will set the output to high, assuming the output isn't inverted.
+func (pwm PWM) Set(channel uint8, value uint32) {
+	switch pwm.num {
 	case 0:
 		value := uint16(value)
-		switch ch.Channel {
+		switch channel {
 		case 0: // channel A
 			if value == 0 {
 				avr.TCCR0A.ClearBits(avr.TCCR0A_COM0A1)
@@ -404,7 +397,7 @@ func (ch PWMChannel) Set(value uint32) {
 		}
 	case 1:
 		mask := interrupt.Disable()
-		switch ch.Channel {
+		switch channel {
 		case 0: // channel A, PB1
 			if value == 0 {
 				avr.TCCR1A.ClearBits(avr.TCCR1A_COM1A1 | avr.TCCR1A_COM1A0)
@@ -439,7 +432,7 @@ func (ch PWMChannel) Set(value uint32) {
 		interrupt.Restore(mask)
 	case 2:
 		value := uint16(value)
-		switch ch.Channel {
+		switch channel {
 		case 0: // channel A
 			if value == 0 {
 				avr.TCCR2A.ClearBits(avr.TCCR2A_COM2A1)
