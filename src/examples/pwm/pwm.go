@@ -7,18 +7,6 @@ import (
 	"time"
 )
 
-var (
-	// Configuration on an Adafruit Circuit Playground Express.
-	pwm  = machine.PWM1
-	pinA = machine.A2
-	pinB = machine.A3
-
-	// Configuration on an Arduino Uno.
-	//pwm  = machine.Timer2
-	//pinA = machine.PB3 // pin 11 on the Uno
-	//pinB = machine.PD3 // pin 3 on the Uno
-)
-
 const delayBetweenPeriods = time.Second * 5
 
 func main() {

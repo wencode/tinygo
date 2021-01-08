@@ -28,8 +28,8 @@ const (
 	PinInput         PinMode = 9
 	PinInputPullup   PinMode = 10
 	PinOutput        PinMode = 11
-	PinPWM           PinMode = PinTimer
-	PinPWMAlt        PinMode = PinTimerAlt
+	PinTCC           PinMode = PinTimer
+	PinTCCAlt        PinMode = PinTimerAlt
 	PinInputPulldown PinMode = 12
 )
 
@@ -1221,28 +1221,28 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 	return byte(spi.Bus.DATA.Get()), nil
 }
 
-// PWM is one PWM peripheral, which consists of a counter and multiple output
-// channels (that can be connected to actual pins). You can set the frequency
-// using SetPeriod, but only for all the channels in this PWM peripheral at
-// once.
-type PWM sam.TCC_Type
+// TCC is one timer/counter peripheral, which consists of a counter and multiple
+// output channels (that can be connected to actual pins). You can set the
+// frequency using SetPeriod, but only for all the channels in this TCC
+// peripheral at once.
+type TCC sam.TCC_Type
 
 // The SAM D21 has three TCC peripherals, which have PWM as one feature.
 var (
-	PWM0 = (*PWM)(sam.TCC0)
-	PWM1 = (*PWM)(sam.TCC1)
-	PWM2 = (*PWM)(sam.TCC2)
+	TCC0 = (*TCC)(sam.TCC0)
+	TCC1 = (*TCC)(sam.TCC1)
+	TCC2 = (*TCC)(sam.TCC2)
 )
 
 //go:inline
-func (pwm *PWM) timer() *sam.TCC_Type {
-	return (*sam.TCC_Type)(pwm)
+func (tcc *TCC) timer() *sam.TCC_Type {
+	return (*sam.TCC_Type)(tcc)
 }
 
-// Configure enables and configures this PWM.
-func (pwm *PWM) Configure(config PWMConfig) error {
+// Configure enables and configures this TCC.
+func (tcc *TCC) Configure(config PWMConfig) error {
 	// Enable the clock source for this timer.
-	switch pwm.timer() {
+	switch tcc.timer() {
 	case sam.TCC0:
 		sam.PM.APBCMASK.SetBits(sam.PM_APBCMASK_TCC0_)
 		// Use GCLK0 for TCC0/TCC1
@@ -1270,32 +1270,32 @@ func (pwm *PWM) Configure(config PWMConfig) error {
 	}
 
 	// Disable timer (if it was enabled). This is necessary because
-	// pwm.setPeriod may want to change the prescaler bits in CTRLA, which is
+	// tcc.setPeriod may want to change the prescaler bits in CTRLA, which is
 	// only allowed when the TCC is disabled.
-	pwm.timer().CTRLA.ClearBits(sam.TCC_CTRLA_ENABLE)
+	tcc.timer().CTRLA.ClearBits(sam.TCC_CTRLA_ENABLE)
 
 	// Use "Normal PWM" (single-slope PWM)
-	pwm.timer().WAVE.Set(sam.TCC_WAVE_WAVEGEN_NPWM)
+	tcc.timer().WAVE.Set(sam.TCC_WAVE_WAVEGEN_NPWM)
 
 	// Wait for synchronization of all changed registers.
-	for pwm.timer().SYNCBUSY.Get() != 0 {
+	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
 
 	// Set the period and prescaler.
-	err := pwm.setPeriod(config.Period, true)
+	err := tcc.setPeriod(config.Period, true)
 
 	// Enable the timer.
-	pwm.timer().CTRLA.SetBits(sam.TCC_CTRLA_ENABLE)
+	tcc.timer().CTRLA.SetBits(sam.TCC_CTRLA_ENABLE)
 
 	// Wait for synchronization of all changed registers.
-	for pwm.timer().SYNCBUSY.Get() != 0 {
+	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
 
-	// Return any error that might have occured in the pwm.setPeriod call.
+	// Return any error that might have occured in the tcc.setPeriod call.
 	return err
 }
 
-// SetPeriod updates the period of this PWM peripheral.
+// SetPeriod updates the period of this TCC peripheral.
 // To set a particular frequency, use the following formula:
 //
 //     period = 1e9 / frequency
@@ -1306,28 +1306,28 @@ func (pwm *PWM) Configure(config PWMConfig) error {
 // value in any of the channels. This means that you may need to update the
 // value for the particular channel.
 //
-// Note that you cannot pick any arbitrary period after the PWM peripheral has
+// Note that you cannot pick any arbitrary period after the TCC peripheral has
 // been configured. If you want to switch between frequencies, pick the lowest
 // frequency (longest period) once when calling Configure and adjust the
 // frequency here as needed.
-func (pwm *PWM) SetPeriod(period uint64) error {
-	err := pwm.setPeriod(period, false)
+func (tcc *TCC) SetPeriod(period uint64) error {
+	err := tcc.setPeriod(period, false)
 	if err == nil {
-		if pwm.Counter() >= pwm.Top() {
+		if tcc.Counter() >= tcc.Top() {
 			// When setting the timer to a shorter period, there is a chance
 			// that it passes the counter value and thus goes all the way to MAX
 			// before wrapping back to zero.
 			// To avoid this, reset the counter back to 0.
-			pwm.timer().COUNT.Set(0)
+			tcc.timer().COUNT.Set(0)
 		}
 	}
 	return err
 }
 
-// setPeriod sets the period of this PWM, possibly updating the prescaler as
-// well. The prescaler can only modified when the PWM is disabled, that is, in
+// setPeriod sets the period of this TCC, possibly updating the prescaler as
+// well. The prescaler can only modified when the TCC is disabled, that is, in
 // the Configure function.
-func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
+func (tcc *TCC) setPeriod(period uint64, updatePrescaler bool) error {
 	var top uint64
 	if period == 0 {
 		// Make sure the TOP value is at 0xffff (enough for a 16-bit timer).
@@ -1340,7 +1340,7 @@ func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 	}
 
 	maxTop := uint64(0xffffff)
-	if pwm.timer() == sam.TCC2 {
+	if tcc.timer() == sam.TCC2 {
 		// TCC2 is a 16-bit timer, not a 24-bit timer.
 		maxTop = 0xffff
 	}
@@ -1377,12 +1377,12 @@ func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 		default:
 			return ErrPWMPeriodTooLong
 		}
-		pwm.timer().CTRLA.Set((pwm.timer().CTRLA.Get() &^ sam.TCC_CTRLA_PRESCALER_Msk) | (prescaler << sam.TCC_CTRLA_PRESCALER_Pos))
+		tcc.timer().CTRLA.Set((tcc.timer().CTRLA.Get() &^ sam.TCC_CTRLA_PRESCALER_Msk) | (prescaler << sam.TCC_CTRLA_PRESCALER_Pos))
 	} else {
 		// Do not update the prescaler, but use the already-configured
 		// prescaler. This is the normal SetPeriod case, where the prescaler
 		// must not be changed.
-		prescaler := (pwm.timer().CTRLA.Get() & sam.TCC_CTRLA_PRESCALER_Msk) >> sam.TCC_CTRLA_PRESCALER_Pos
+		prescaler := (tcc.timer().CTRLA.Get() & sam.TCC_CTRLA_PRESCALER_Msk) >> sam.TCC_CTRLA_PRESCALER_Pos
 		switch prescaler {
 		case sam.TCC_CTRLA_PRESCALER_DIV1:
 			top /= 1 // no-op
@@ -1409,10 +1409,10 @@ func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 	}
 
 	// Set the period (the counter top).
-	pwm.timer().PER.Set(uint32(top) - 1)
+	tcc.timer().PER.Set(uint32(top) - 1)
 
 	// Wait for synchronization of CTRLA.PRESCALER and PER registers.
-	for pwm.timer().SYNCBUSY.Get() != 0 {
+	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
 
 	return nil
@@ -1425,17 +1425,17 @@ func (pwm *PWM) setPeriod(period uint64, updatePrescaler bool) error {
 // The value returned here is hardware dependent. In general, it's best to treat
 // it as an opaque value that can be divided by some number and passed to Set
 // (see Set documentation for more information).
-func (pwm *PWM) Top() uint32 {
-	return pwm.timer().PER.Get() + 1
+func (tcc *TCC) Top() uint32 {
+	return tcc.timer().PER.Get() + 1
 }
 
-// Counter returns the current counter value of the timer in this PWM
+// Counter returns the current counter value of the timer in this TCC
 // peripheral. It may be useful for debugging.
-func (pwm *PWM) Counter() uint32 {
-	pwm.timer().CTRLBSET.Set(sam.TCC_CTRLBSET_CMD_READSYNC << sam.TCC_CTRLBSET_CMD_Pos)
-	for pwm.timer().SYNCBUSY.Get() != 0 {
+func (tcc *TCC) Counter() uint32 {
+	tcc.timer().CTRLBSET.Set(sam.TCC_CTRLBSET_CMD_READSYNC << sam.TCC_CTRLBSET_CMD_Pos)
+	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
-	return pwm.timer().COUNT.Get()
+	return tcc.timer().COUNT.Get()
 }
 
 // Some constans to make pinTimerMapping below easier to read.
@@ -1454,8 +1454,8 @@ const (
 
 // Mapping from pin number to TCC peripheral and channel using a special
 // encoding. Note that only TCC0-TCC2 are included, not TC3 and up.
-// Every byte is split in two nibbles where the low nibble describes PinPWM and
-// the high nibble describes PinPWMAlt. Within a nibble, there is one bit that
+// Every byte is split in two nibbles where the low nibble describes PinTCC and
+// the high nibble describes PinTCCAlt. Within a nibble, there is one bit that
 // indicates Ch0/Ch1 or Ch2/Ch3, and three other bits that contain the TCC
 // peripheral number plus one (to distinguish between TCC0Ch0 and 0).
 //
@@ -1489,7 +1489,7 @@ var pinTimerMapping = [...]uint8{
 	PB30 / 2: pinTCC0Ch0 | pinTCC1Ch2<<4,
 }
 
-// findPinPadMapping returns the pin mode (PinPWM or PinPWMAlt) and the channel
+// findPinPadMapping returns the pin mode (PinTCC or PinTCCAlt) and the channel
 // number for a given timer and pin. A zero PinMode is returned if no mapping
 // could be found.
 func findPinTimerMapping(timer uint8, pin Pin) (PinMode, uint8) {
@@ -1499,23 +1499,24 @@ func findPinTimerMapping(timer uint8, pin Pin) (PinMode, uint8) {
 	if mapping&0x07 == timer+1 {
 		// PWM output is on peripheral function E.
 		evenChannel := ((mapping >> 3) & 1) * 2
-		return PinPWM, evenChannel + uint8(pin&1)
+		return PinTCC, evenChannel + uint8(pin&1)
 	}
 	if (mapping&0x70)>>4 == timer+1 {
 		// PWM output is on peripheral function F.
 		evenChannel := ((mapping >> 7) & 1) * 2
-		return PinPWMAlt, evenChannel + uint8(pin&1)
+		return PinTCCAlt, evenChannel + uint8(pin&1)
 	}
 	return 0, 0
 }
 
 // Channel returns a PWM channel for the given pin. Note that one channel may be
 // shared between multiple pins, and so will have the same duty cycle. If this
-// is not desirable, look for a different PWM or consider using a different pin.
-func (pwm *PWM) Channel(pin Pin) (uint8, error) {
+// is not desirable, look for a different TCC peripheral or consider using a
+// different pin.
+func (tcc *TCC) Channel(pin Pin) (uint8, error) {
 	var pinMode PinMode
 	var channel uint8
-	switch pwm.timer() {
+	switch tcc.timer() {
 	case sam.TCC0:
 		pinMode, channel = findPinTimerMapping(0, pin)
 	case sam.TCC1:
@@ -1549,15 +1550,15 @@ func (pwm *PWM) Channel(pin Pin) (uint8, error) {
 // the time and low for the rest. Inverting flips the output as if a NOT gate
 // was placed at the output, meaning that the output would be 25% low and 75%
 // high with a duty cycle of 25%.
-func (pwm *PWM) SetInverting(channel uint8, inverting bool) {
+func (tcc *TCC) SetInverting(channel uint8, inverting bool) {
 	if inverting {
-		pwm.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
+		tcc.timer().WAVE.SetBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
 	} else {
-		pwm.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
+		tcc.timer().WAVE.ClearBits(1 << (sam.TCC_WAVE_POL0_Pos + channel))
 	}
 
 	// Wait for synchronization of the WAVE register.
-	for pwm.timer().SYNCBUSY.Get() != 0 {
+	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 
@@ -1565,28 +1566,28 @@ func (pwm *PWM) SetInverting(channel uint8, inverting bool) {
 // cycle, in other words the fraction of time the channel output is high (or low
 // when inverted). For example, to set it to a 25% duty cycle, use:
 //
-//     pwm.Set(channel, pwm.Top() / 4)
+//     tcc.Set(channel, tcc.Top() / 4)
 //
-// pwm.Set(channel, 0) will set the output to low and pwm.Set(channel,
-// pwm.Top()) will set the output to high, assuming the output isn't inverted.
-func (pwm *PWM) Set(channel uint8, value uint32) {
+// tcc.Set(channel, 0) will set the output to low and tcc.Set(channel,
+// tcc.Top()) will set the output to high, assuming the output isn't inverted.
+func (tcc *TCC) Set(channel uint8, value uint32) {
 	// Set PWM signal to output duty cycle
 	switch channel {
 	case 0:
-		pwm.timer().CC0.Set(value)
+		tcc.timer().CC0.Set(value)
 	case 1:
-		pwm.timer().CC1.Set(value)
+		tcc.timer().CC1.Set(value)
 	case 2:
-		pwm.timer().CC2.Set(value)
+		tcc.timer().CC2.Set(value)
 	case 3:
-		pwm.timer().CC3.Set(value)
+		tcc.timer().CC3.Set(value)
 	default:
-		// invalid PWMChannel struct, ignore.
+		// invalid PWM channel, ignore.
 	}
 
 	// Wait for synchronization on all channels (or anything in this peripheral,
 	// really).
-	for pwm.timer().SYNCBUSY.Get() != 0 {
+	for tcc.timer().SYNCBUSY.Get() != 0 {
 	}
 }
 

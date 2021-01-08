@@ -13,16 +13,16 @@ const HSRAM_SIZE = 0x00030000
 
 // This chip has five TCC peripherals, which have PWM as one feature.
 var (
-	PWM0 = (*PWM)(sam.TCC0)
-	PWM1 = (*PWM)(sam.TCC1)
-	PWM2 = (*PWM)(sam.TCC2)
-	PWM3 = (*PWM)(sam.TCC3)
-	PWM4 = (*PWM)(sam.TCC4)
+	TCC0 = (*TCC)(sam.TCC0)
+	TCC1 = (*TCC)(sam.TCC1)
+	TCC2 = (*TCC)(sam.TCC2)
+	TCC3 = (*TCC)(sam.TCC3)
+	TCC4 = (*TCC)(sam.TCC4)
 )
 
-func (pwm *PWM) configureClock() {
-	// Turn on timer clocks used for PWM and use generic clock generator 0.
-	switch pwm.timer() {
+func (tcc *TCC) configureClock() {
+	// Turn on timer clocks used for the TCC and use generic clock generator 0.
+	switch tcc.timer() {
 	case sam.TCC0:
 		sam.MCLK.APBBMASK.SetBits(sam.MCLK_APBBMASK_TCC0_)
 		sam.GCLK.PCHCTRL[sam.PCHCTRL_GCLK_TCC0].Set((sam.GCLK_PCHCTRL_GEN_GCLK0 << sam.GCLK_PCHCTRL_GEN_Pos) | sam.GCLK_PCHCTRL_CHEN)
@@ -41,8 +41,8 @@ func (pwm *PWM) configureClock() {
 	}
 }
 
-func (pwm *PWM) timerNum() uint8 {
-	switch pwm.timer() {
+func (tcc *TCC) timerNum() uint8 {
+	switch tcc.timer() {
 	case sam.TCC0:
 		return 0
 	case sam.TCC1:
