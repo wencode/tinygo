@@ -54,32 +54,46 @@ ifeq ($(OS),Windows_NT)
     CGO_LDFLAGS += -static -static-libgcc -static-libstdc++
     CGO_LDFLAGS_EXTRA += -lversion
 
-    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/liblibclang.a
+    LIBCLANG_NAME = libclang
 
 else ifeq ($(shell uname -s),Darwin)
     MD5SUM = md5
-    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/libclang.a
+    LIBCLANG_NAME = clang
 else ifeq ($(shell uname -s),FreeBSD)
     MD5SUM = md5
-    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/libclang.a
+    LIBCLANG_NAME = clang
     START_GROUP = -Wl,--start-group
     END_GROUP = -Wl,--end-group
 else
-    LIBCLANG_PATH = $(abspath $(LLVM_BUILDDIR))/lib/libclang.a
+    LIBCLANG_NAME = clang
     START_GROUP = -Wl,--start-group
     END_GROUP = -Wl,--end-group
 endif
 
-CLANG_LIBS = $(START_GROUP) -lclangAnalysis -lclangARCMigrate -lclangAST -lclangASTMatchers -lclangBasic -lclangCodeGen -lclangCrossTU -lclangDriver -lclangDynamicASTMatchers -lclangEdit -lclangFormat -lclangFrontend -lclangFrontendTool -lclangHandleCXX -lclangHandleLLVM -lclangIndex -lclangLex -lclangParse -lclangRewrite -lclangRewriteFrontend -lclangSema -lclangSerialization -lclangStaticAnalyzerCheckers -lclangStaticAnalyzerCore -lclangStaticAnalyzerFrontend -lclangTooling -lclangToolingASTDiff -lclangToolingCore -lclangToolingInclusions $(END_GROUP) -lstdc++
+# Libraries that should be linked in for the statically linked Clang.
+CLANG_LIB_NAMES = clangAnalysis clangARCMigrate clangAST clangASTMatchers clangBasic clangCodeGen clangCrossTU clangDriver clangDynamicASTMatchers clangEdit clangFormat clangFrontend clangFrontendTool clangHandleCXX clangHandleLLVM clangIndex clangLex clangParse clangRewrite clangRewriteFrontend clangSema clangSerialization clangStaticAnalyzerCheckers clangStaticAnalyzerCore clangStaticAnalyzerFrontend clangTooling clangToolingASTDiff clangToolingCore clangToolingInclusions
+CLANG_LIBS = $(START_GROUP) $(addprefix -l,$(CLANG_LIB_NAMES)) $(END_GROUP) -lstdc++
 
-LLD_LIBS = $(START_GROUP) -llldCOFF -llldCommon -llldCore -llldDriver -llldELF -llldMachO -llldMinGW -llldReaderWriter -llldWasm -llldYAML $(END_GROUP)
+# Libraries that should be linked in for the statically linked LLD.
+LLD_LIB_NAMES = lldCOFF lldCommon lldCore lldDriver lldELF lldMachO lldMinGW lldReaderWriter lldWasm lldYAML
+LLD_LIBS = $(START_GROUP) $(addprefix -l,$(LLD_LIB_NAMES)) $(END_GROUP)
 
+# Other libraries that are needed to link TinyGo.
+EXTRA_LIB_NAMES = LLVMInterpreter
+
+# These build targets appear to be the only ones necessary to build all TinyGo
+# dependencies. Only building a subset significantly speeds up rebuilding LLVM.
+# The Makefile rules convert a name like lldELF to lib/liblldELF.a to match the
+# library path (for ninja).
+# This list also includes a few tools that are necessary as part of the full
+# TinyGo build.
+NINJA_BUILD_TARGETS = clang llvm-config llvm-ar llvm-nm $(addprefix lib/lib,$(addsuffix .a,$(LIBCLANG_NAME) $(CLANG_LIB_NAMES) $(LLD_LIB_NAMES) $(EXTRA_LIB_NAMES)))
 
 # For static linking.
 ifneq ("$(wildcard $(LLVM_BUILDDIR)/bin/llvm-config*)","")
     CGO_CPPFLAGS+=$(shell $(LLVM_BUILDDIR)/bin/llvm-config --cppflags) -I$(abspath $(LLVM_BUILDDIR))/tools/clang/include -I$(abspath $(CLANG_SRC))/include -I$(abspath $(LLD_SRC))/include
     CGO_CXXFLAGS=-std=c++14
-    CGO_LDFLAGS+=$(LIBCLANG_PATH) -L$(abspath $(LLVM_BUILDDIR)/lib) $(CLANG_LIBS) $(LLD_LIBS) $(shell $(LLVM_BUILDDIR)/bin/llvm-config --ldflags --libs --system-libs $(LLVM_COMPONENTS)) -lstdc++ $(CGO_LDFLAGS_EXTRA)
+    CGO_LDFLAGS+=$(abspath $(LLVM_BUILDDIR))/lib/lib$(LIBCLANG_NAME).a -L$(abspath $(LLVM_BUILDDIR)/lib) $(CLANG_LIBS) $(LLD_LIBS) $(shell $(LLVM_BUILDDIR)/bin/llvm-config --ldflags --libs --system-libs $(LLVM_COMPONENTS)) -lstdc++ $(CGO_LDFLAGS_EXTRA)
 endif
 
 
@@ -142,11 +156,11 @@ llvm-source: $(LLVM_PROJECTDIR)/README.md
 # Configure LLVM.
 TINYGO_SOURCE_DIR=$(shell pwd)
 $(LLVM_BUILDDIR)/build.ninja: llvm-source
-	mkdir -p $(LLVM_BUILDDIR); cd $(LLVM_BUILDDIR); cmake -G Ninja $(TINYGO_SOURCE_DIR)/$(LLVM_PROJECTDIR)/llvm "-DLLVM_TARGETS_TO_BUILD=X86;ARM;AArch64;RISCV;WebAssembly" "-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=AVR;Xtensa" -DCMAKE_BUILD_TYPE=Release -DLIBCLANG_BUILD_STATIC=ON -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_Z3_SOLVER=OFF -DLLVM_ENABLE_OCAMLDOC=OFF -DLLVM_ENABLE_PROJECTS="clang;lld" -DLLVM_TOOL_CLANG_TOOLS_EXTRA_BUILD=OFF $(LLVM_OPTION)
+	mkdir -p $(LLVM_BUILDDIR); cd $(LLVM_BUILDDIR); cmake -G Ninja $(TINYGO_SOURCE_DIR)/$(LLVM_PROJECTDIR)/llvm "-DLLVM_TARGETS_TO_BUILD=X86;ARM;AArch64;RISCV;WebAssembly" "-DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD=AVR;Xtensa" -DCMAKE_BUILD_TYPE=Release -DLIBCLANG_BUILD_STATIC=ON -DLLVM_ENABLE_TERMINFO=OFF -DLLVM_ENABLE_ZLIB=OFF -DLLVM_ENABLE_LIBEDIT=OFF -DLLVM_ENABLE_Z3_SOLVER=OFF -DLLVM_ENABLE_OCAMLDOC=OFF -DLLVM_ENABLE_LIBXML2=OFF -DLLVM_ENABLE_PROJECTS="clang;lld" -DLLVM_TOOL_CLANG_TOOLS_EXTRA_BUILD=OFF $(LLVM_OPTION)
 
 # Build LLVM.
 $(LLVM_BUILDDIR): $(LLVM_BUILDDIR)/build.ninja
-	cd $(LLVM_BUILDDIR); ninja
+	cd $(LLVM_BUILDDIR); ninja $(NINJA_BUILD_TARGETS)
 
 
 # Build wasi-libc sysroot
@@ -326,6 +340,8 @@ smoketest:
 	$(TINYGO) build -size short -o test.hex -target=teensy36            examples/blinky1
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=nucleo-f722ze       examples/blinky1
+	@$(MD5SUM) test.hex
+	$(TINYGO) build -size short -o test.hex -target=nucleo-l552ze       examples/blinky1
 	@$(MD5SUM) test.hex
 	$(TINYGO) build -size short -o test.hex -target=p1am-100            examples/blinky1
 	@$(MD5SUM) test.hex

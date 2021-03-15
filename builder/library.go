@@ -42,7 +42,7 @@ func (l *Library) sourcePaths(target string) []string {
 // The resulting file is stored in the provided tmpdir, which is expected to be
 // removed after the Load call.
 func (l *Library) Load(target, tmpdir string) (path string, err error) {
-	path, job, err := l.load(target, tmpdir)
+	path, job, err := l.load(target, "", tmpdir)
 	if err != nil {
 		return "", err
 	}
@@ -59,7 +59,7 @@ func (l *Library) Load(target, tmpdir string) (path string, err error) {
 // path is valid.
 // The provided tmpdir will be used to store intermediary files and possibly the
 // output archive file, it is expected to be removed after use.
-func (l *Library) load(target, tmpdir string) (path string, job *compileJob, err error) {
+func (l *Library) load(target, cpu, tmpdir string) (path string, job *compileJob, err error) {
 	// Try to load a precompiled library.
 	precompiledPath := filepath.Join(goenv.Get("TINYGOROOT"), "pkg", target, l.name+".a")
 	if _, err := os.Stat(precompiledPath); err == nil {
@@ -68,10 +68,15 @@ func (l *Library) load(target, tmpdir string) (path string, job *compileJob, err
 		return precompiledPath, nil, nil
 	}
 
-	outfile := l.name + "-" + target + ".a"
+	var outfile string
+	if cpu != "" {
+		outfile = l.name + "-" + target + "-" + cpu + ".a"
+	} else {
+		outfile = l.name + "-" + target + ".a"
+	}
 
 	// Try to fetch this library from the cache.
-	if path, err := cacheLoad(outfile, commands["clang"][0], l.sourcePaths(target)); path != "" || err != nil {
+	if path, err := cacheLoad(outfile, l.sourcePaths(target)); path != "" || err != nil {
 		// Cache hit.
 		return path, nil, err
 	}
@@ -89,6 +94,9 @@ func (l *Library) load(target, tmpdir string) (path string, job *compileJob, err
 	// reproducible. Otherwise the temporary directory is stored in the archive
 	// itself, which varies each run.
 	args := append(l.cflags(), "-c", "-Oz", "-g", "-ffunction-sections", "-fdata-sections", "-Wno-macro-redefined", "--target="+target, "-fdebug-prefix-map="+dir+"="+remapDir)
+	if cpu != "" {
+		args = append(args, "-mcpu="+cpu)
+	}
 	if strings.HasPrefix(target, "arm") || strings.HasPrefix(target, "thumb") {
 		args = append(args, "-fshort-enums", "-fomit-frame-pointer", "-mfloat-abi=soft")
 	}
@@ -112,7 +120,7 @@ func (l *Library) load(target, tmpdir string) (path string, job *compileJob, err
 				return err
 			}
 			// Store this archive in the cache.
-			_, err = cacheStore(arpath, outfile, commands["clang"][0], l.sourcePaths(target))
+			_, err = cacheStore(arpath, outfile, l.sourcePaths(target))
 			return err
 		},
 	}

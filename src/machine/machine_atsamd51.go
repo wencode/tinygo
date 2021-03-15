@@ -10,7 +10,9 @@ package machine
 import (
 	"device/arm"
 	"device/sam"
+	"errors"
 	"runtime/interrupt"
+	"runtime/volatile"
 	"unsafe"
 )
 
@@ -1468,6 +1470,96 @@ func (spi SPI) Transfer(w byte) (byte, error) {
 	return byte(spi.Bus.DATA.Get()), nil
 }
 
+var (
+	ErrTxInvalidSliceSize = errors.New("SPI write and read slices must be same size")
+)
+
+// Tx handles read/write operation for SPI interface. Since SPI is a syncronous write/read
+// interface, there must always be the same number of bytes written as bytes read.
+// The Tx method knows about this, and offers a few different ways of calling it.
+//
+// This form sends the bytes in tx buffer, putting the resulting bytes read into the rx buffer.
+// Note that the tx and rx buffers must be the same size:
+//
+// 		spi.Tx(tx, rx)
+//
+// This form sends the tx buffer, ignoring the result. Useful for sending "commands" that return zeros
+// until all the bytes in the command packet have been received:
+//
+// 		spi.Tx(tx, nil)
+//
+// This form sends zeros, putting the result into the rx buffer. Good for reading a "result packet":
+//
+// 		spi.Tx(nil, rx)
+//
+func (spi SPI) Tx(w, r []byte) error {
+	switch {
+	case w == nil:
+		// read only, so write zero and read a result.
+		spi.rx(r)
+	case r == nil:
+		// write only
+		spi.tx(w)
+
+	default:
+		// write/read
+		if len(w) != len(r) {
+			return ErrTxInvalidSliceSize
+		}
+
+		spi.txrx(w, r)
+	}
+
+	return nil
+}
+
+func (spi SPI) tx(tx []byte) {
+	for i := 0; i < len(tx); i++ {
+		for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_DRE) {
+		}
+		spi.Bus.DATA.Set(uint32(tx[i]))
+	}
+	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_TXC) {
+	}
+
+	// read to clear RXC register
+	for spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_RXC) {
+		spi.Bus.DATA.Get()
+	}
+}
+
+func (spi SPI) rx(rx []byte) {
+	spi.Bus.DATA.Set(0)
+	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_DRE) {
+	}
+
+	for i := 1; i < len(rx); i++ {
+		spi.Bus.DATA.Set(0)
+		for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_RXC) {
+		}
+		rx[i-1] = byte(spi.Bus.DATA.Get())
+	}
+	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_RXC) {
+	}
+	rx[len(rx)-1] = byte(spi.Bus.DATA.Get())
+}
+
+func (spi SPI) txrx(tx, rx []byte) {
+	spi.Bus.DATA.Set(uint32(tx[0]))
+	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_DRE) {
+	}
+
+	for i := 1; i < len(rx); i++ {
+		spi.Bus.DATA.Set(uint32(tx[i]))
+		for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_RXC) {
+		}
+		rx[i-1] = byte(spi.Bus.DATA.Get())
+	}
+	for !spi.Bus.INTFLAG.HasBits(sam.SERCOM_SPIM_INTFLAG_RXC) {
+	}
+	rx[len(rx)-1] = byte(spi.Bus.DATA.Get())
+}
+
 // The QSPI peripheral on ATSAMD51 is only available on the following pins
 const (
 	QSPI_SCK   = PB10
@@ -1733,36 +1825,104 @@ func (pwm PWM) getMux() PinMode {
 
 // USBCDC is the USB CDC aka serial over USB interface on the SAMD21.
 type USBCDC struct {
-	Buffer *RingBuffer
+	Buffer            *RingBuffer
+	TxIdx             volatile.Register8
+	waitTxc           bool
+	waitTxcRetryCount uint8
+	sent              bool
+}
+
+const (
+	usbcdcTxSizeMask          uint8 = 0x3F
+	usbcdcTxBankMask          uint8 = ^usbcdcTxSizeMask
+	usbcdcTxBank1st           uint8 = 0x00
+	usbcdcTxBank2nd           uint8 = usbcdcTxSizeMask + 1
+	usbcdcTxMaxRetriesAllowed uint8 = 5
+)
+
+// Flush flushes buffered data.
+func (usbcdc *USBCDC) Flush() error {
+	if usbLineInfo.lineState > 0 {
+		idx := usbcdc.TxIdx.Get()
+		sz := idx & usbcdcTxSizeMask
+		bk := idx & usbcdcTxBankMask
+		if 0 < sz {
+
+			if usbcdc.waitTxc {
+				// waiting for the next flush(), because the transmission is not complete
+				return nil
+			}
+			usbcdc.waitTxc = true
+			usbcdc.waitTxcRetryCount = 0
+
+			// set the data
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].ADDR.Set(uint32(uintptr(unsafe.Pointer(&udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN][bk]))))
+			if bk == usbcdcTxBank1st {
+				usbcdc.TxIdx.Set(usbcdcTxBank2nd)
+			} else {
+				usbcdc.TxIdx.Set(usbcdcTxBank1st)
+			}
+
+			// clean multi packet size of bytes already sent
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.ClearBits(usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Mask << usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Pos)
+
+			// set count of bytes to be sent
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.ClearBits(usb_DEVICE_PCKSIZE_BYTE_COUNT_Mask << usb_DEVICE_PCKSIZE_BYTE_COUNT_Pos)
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.SetBits((uint32(sz) & usb_DEVICE_PCKSIZE_BYTE_COUNT_Mask) << usb_DEVICE_PCKSIZE_BYTE_COUNT_Pos)
+
+			// clear transfer complete flag
+			setEPINTFLAG(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_ENDPOINT_EPINTFLAG_TRCPT1)
+
+			// send data by setting bank ready
+			setEPSTATUSSET(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_ENDPOINT_EPSTATUSSET_BK1RDY)
+			UART0.sent = true
+		}
+	}
+	return nil
 }
 
 // WriteByte writes a byte of data to the USB CDC interface.
-func (usbcdc USBCDC) WriteByte(c byte) error {
+func (usbcdc *USBCDC) WriteByte(c byte) error {
 	// Supposedly to handle problem with Windows USB serial ports?
 	if usbLineInfo.lineState > 0 {
-		// set the data
-		udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN][0] = c
+		ok := false
+		for {
+			mask := interrupt.Disable()
 
-		usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].ADDR.Set(uint32(uintptr(unsafe.Pointer(&udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN]))))
+			idx := UART0.TxIdx.Get()
+			if (idx & usbcdcTxSizeMask) < usbcdcTxSizeMask {
+				udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN][idx] = c
+				UART0.TxIdx.Set(idx + 1)
+				ok = true
+			}
 
-		// clean multi packet size of bytes already sent
-		usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.ClearBits(usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Mask << usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Pos)
+			interrupt.Restore(mask)
 
-		// set count of bytes to be sent
-		usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.SetBits((1 & usb_DEVICE_PCKSIZE_BYTE_COUNT_Mask) << usb_DEVICE_PCKSIZE_BYTE_COUNT_Pos)
-
-		// clear transfer complete flag
-		setEPINTFLAG(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_ENDPOINT_EPINTFLAG_TRCPT1)
-
-		// send data by setting bank ready
-		setEPSTATUSSET(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_ENDPOINT_EPSTATUSSET_BK1RDY)
-
-		// wait for transfer to complete
-		timeout := 3000
-		for (getEPINTFLAG(usb_CDC_ENDPOINT_IN) & sam.USB_DEVICE_ENDPOINT_EPINTFLAG_TRCPT1) == 0 {
-			timeout--
-			if timeout == 0 {
-				return errUSBCDCWriteByteTimeout
+			if ok {
+				break
+			} else if usbcdcTxMaxRetriesAllowed < UART0.waitTxcRetryCount {
+				mask := interrupt.Disable()
+				UART0.waitTxc = false
+				UART0.waitTxcRetryCount = 0
+				usbcdc.TxIdx.Set(0)
+				usbLineInfo.lineState = 0
+				interrupt.Restore(mask)
+				break
+			} else {
+				mask := interrupt.Disable()
+				if UART0.sent {
+					if UART0.waitTxc {
+						if (getEPINTFLAG(usb_CDC_ENDPOINT_IN) & sam.USB_DEVICE_ENDPOINT_EPINTFLAG_TRCPT1) != 0 {
+							setEPSTATUSCLR(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_ENDPOINT_EPSTATUSCLR_BK1RDY)
+							setEPINTFLAG(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_ENDPOINT_EPINTFLAG_TRCPT1)
+							UART0.waitTxc = false
+							UART0.Flush()
+						}
+					} else {
+						UART0.Flush()
+					}
+				}
+				interrupt.Restore(mask)
 			}
 		}
 	}
@@ -1971,9 +2131,19 @@ func handleUSBIRQ(interrupt.Interrupt) {
 			case usb_CDC_ENDPOINT_IN, usb_CDC_ENDPOINT_ACM:
 				setEPSTATUSCLR(i, sam.USB_DEVICE_ENDPOINT_EPSTATUSCLR_BK1RDY)
 				setEPINTFLAG(i, sam.USB_DEVICE_ENDPOINT_EPINTFLAG_TRCPT1)
+
+				if i == usb_CDC_ENDPOINT_IN {
+					UART0.waitTxc = false
+				}
 			}
 		}
+
+		if i == usb_CDC_ENDPOINT_IN && UART0.waitTxc {
+			UART0.waitTxcRetryCount++
+		}
 	}
+
+	UART0.Flush()
 }
 
 func initEndpoint(ep, config uint32) {

@@ -11,6 +11,7 @@ import (
 	"device/arm"
 	"device/sam"
 	"runtime/interrupt"
+	"runtime/volatile"
 	"unsafe"
 )
 
@@ -1464,36 +1465,104 @@ func (pwm PWM) setChannel(timer *sam.TCC_Type, val uint32) {
 
 // USBCDC is the USB CDC aka serial over USB interface on the SAMD21.
 type USBCDC struct {
-	Buffer *RingBuffer
+	Buffer            *RingBuffer
+	TxIdx             volatile.Register8
+	waitTxc           bool
+	waitTxcRetryCount uint8
+	sent              bool
+}
+
+const (
+	usbcdcTxSizeMask          uint8 = 0x3F
+	usbcdcTxBankMask          uint8 = ^usbcdcTxSizeMask
+	usbcdcTxBank1st           uint8 = 0x00
+	usbcdcTxBank2nd           uint8 = usbcdcTxSizeMask + 1
+	usbcdcTxMaxRetriesAllowed uint8 = 5
+)
+
+// Flush flushes buffered data.
+func (usbcdc *USBCDC) Flush() error {
+	if usbLineInfo.lineState > 0 {
+		idx := usbcdc.TxIdx.Get()
+		sz := idx & usbcdcTxSizeMask
+		bk := idx & usbcdcTxBankMask
+		if 0 < sz {
+
+			if usbcdc.waitTxc {
+				// waiting for the next flush(), because the transmission is not complete
+				return nil
+			}
+			usbcdc.waitTxc = true
+			usbcdc.waitTxcRetryCount = 0
+
+			// set the data
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].ADDR.Set(uint32(uintptr(unsafe.Pointer(&udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN][bk]))))
+			if bk == usbcdcTxBank1st {
+				usbcdc.TxIdx.Set(usbcdcTxBank2nd)
+			} else {
+				usbcdc.TxIdx.Set(usbcdcTxBank1st)
+			}
+
+			// clean multi packet size of bytes already sent
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.ClearBits(usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Mask << usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Pos)
+
+			// set count of bytes to be sent
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.ClearBits(usb_DEVICE_PCKSIZE_BYTE_COUNT_Mask << usb_DEVICE_PCKSIZE_BYTE_COUNT_Pos)
+			usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.SetBits((uint32(sz) & usb_DEVICE_PCKSIZE_BYTE_COUNT_Mask) << usb_DEVICE_PCKSIZE_BYTE_COUNT_Pos)
+
+			// clear transfer complete flag
+			setEPINTFLAG(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_EPINTFLAG_TRCPT1)
+
+			// send data by setting bank ready
+			setEPSTATUSSET(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_EPSTATUSSET_BK1RDY)
+			UART0.sent = true
+		}
+	}
+	return nil
 }
 
 // WriteByte writes a byte of data to the USB CDC interface.
-func (usbcdc USBCDC) WriteByte(c byte) error {
+func (usbcdc *USBCDC) WriteByte(c byte) error {
 	// Supposedly to handle problem with Windows USB serial ports?
 	if usbLineInfo.lineState > 0 {
-		// set the data
-		udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN][0] = c
+		ok := false
+		for {
+			mask := interrupt.Disable()
 
-		usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].ADDR.Set(uint32(uintptr(unsafe.Pointer(&udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN]))))
+			idx := UART0.TxIdx.Get()
+			if (idx & usbcdcTxSizeMask) < usbcdcTxSizeMask {
+				udd_ep_in_cache_buffer[usb_CDC_ENDPOINT_IN][idx] = c
+				UART0.TxIdx.Set(idx + 1)
+				ok = true
+			}
 
-		// clean multi packet size of bytes already sent
-		usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.ClearBits(usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Mask << usb_DEVICE_PCKSIZE_MULTI_PACKET_SIZE_Pos)
+			interrupt.Restore(mask)
 
-		// set count of bytes to be sent
-		usbEndpointDescriptors[usb_CDC_ENDPOINT_IN].DeviceDescBank[1].PCKSIZE.SetBits((1 & usb_DEVICE_PCKSIZE_BYTE_COUNT_Mask) << usb_DEVICE_PCKSIZE_BYTE_COUNT_Pos)
-
-		// clear transfer complete flag
-		setEPINTFLAG(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_EPINTFLAG_TRCPT1)
-
-		// send data by setting bank ready
-		setEPSTATUSSET(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_EPSTATUSSET_BK1RDY)
-
-		// wait for transfer to complete
-		timeout := 3000
-		for (getEPINTFLAG(usb_CDC_ENDPOINT_IN) & sam.USB_DEVICE_EPINTFLAG_TRCPT1) == 0 {
-			timeout--
-			if timeout == 0 {
-				return errUSBCDCWriteByteTimeout
+			if ok {
+				break
+			} else if usbcdcTxMaxRetriesAllowed < UART0.waitTxcRetryCount {
+				mask := interrupt.Disable()
+				UART0.waitTxc = false
+				UART0.waitTxcRetryCount = 0
+				usbcdc.TxIdx.Set(0)
+				usbLineInfo.lineState = 0
+				interrupt.Restore(mask)
+				break
+			} else {
+				mask := interrupt.Disable()
+				if UART0.sent {
+					if UART0.waitTxc {
+						if (getEPINTFLAG(usb_CDC_ENDPOINT_IN) & sam.USB_DEVICE_EPINTFLAG_TRCPT1) != 0 {
+							setEPSTATUSCLR(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_EPSTATUSCLR_BK1RDY)
+							setEPINTFLAG(usb_CDC_ENDPOINT_IN, sam.USB_DEVICE_EPINTFLAG_TRCPT1)
+							UART0.waitTxc = false
+							UART0.Flush()
+						}
+					} else {
+						UART0.Flush()
+					}
+				}
+				interrupt.Restore(mask)
 			}
 		}
 	}
@@ -1700,9 +1769,19 @@ func handleUSB(intr interrupt.Interrupt) {
 			case usb_CDC_ENDPOINT_IN, usb_CDC_ENDPOINT_ACM:
 				setEPSTATUSCLR(i, sam.USB_DEVICE_EPSTATUSCLR_BK1RDY)
 				setEPINTFLAG(i, sam.USB_DEVICE_EPINTFLAG_TRCPT1)
+
+				if i == usb_CDC_ENDPOINT_IN {
+					UART0.waitTxc = false
+				}
 			}
 		}
+
+		if i == usb_CDC_ENDPOINT_IN && UART0.waitTxc {
+			UART0.waitTxcRetryCount++
+		}
 	}
+
+	UART0.Flush()
 }
 
 func initEndpoint(ep, config uint32) {

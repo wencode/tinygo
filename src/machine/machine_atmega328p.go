@@ -88,3 +88,13 @@ func (pwm PWM) Set(value uint16) {
 		panic("Invalid PWM pin")
 	}
 }
+
+// SPI configuration
+var SPI0 = SPI{
+	spcr: avr.SPCR,
+	spdr: avr.SPDR,
+	spsr: avr.SPSR,
+	sck:  PB5,
+	sdo:  PB3,
+	sdi:  PB4,
+	cs:   PB2}

@@ -15,14 +15,16 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"syscall"
+	"sync/atomic"
 	"time"
 
+	"github.com/mattn/go-colorable"
 	"github.com/tinygo-org/tinygo/builder"
 	"github.com/tinygo-org/tinygo/compileopts"
 	"github.com/tinygo-org/tinygo/goenv"
 	"github.com/tinygo-org/tinygo/interp"
 	"github.com/tinygo-org/tinygo/loader"
+	"github.com/tinygo-org/tinygo/transform"
 	"tinygo.org/x/go-llvm"
 
 	"go.bug.st/serial"
@@ -163,10 +165,7 @@ func Test(pkgName string, options *compileopts.Options, testCompileOnly bool, ou
 			if err != nil {
 				// Propagate the exit code
 				if err, ok := err.(*exec.ExitError); ok {
-					if status, ok := err.Sys().(syscall.WaitStatus); ok {
-						os.Exit(status.ExitStatus())
-					}
-					os.Exit(1)
+					os.Exit(err.ExitCode())
 				}
 				return &commandError{"failed to run compiled binary", result.Binary, err}
 			}
@@ -263,7 +262,7 @@ func Flash(pkgName, port string, options *compileopts.Options) error {
 			// Create the command.
 			flashCmd := config.Target.FlashCommand
 			fileToken := "{" + fileExt[1:] + "}"
-			flashCmd = strings.Replace(flashCmd, fileToken, result.Binary, -1)
+			flashCmd = strings.ReplaceAll(flashCmd, fileToken, result.Binary)
 
 			if port == "" && strings.Contains(flashCmd, "{port}") {
 				var err error
@@ -273,7 +272,7 @@ func Flash(pkgName, port string, options *compileopts.Options) error {
 				}
 			}
 
-			flashCmd = strings.Replace(flashCmd, "{port}", port, -1)
+			flashCmd = strings.ReplaceAll(flashCmd, "{port}", port)
 
 			// Execute the command.
 			var cmd *exec.Cmd
@@ -392,7 +391,7 @@ func FlashGDB(pkgName string, ocdOutput bool, options *compileopts.Options) erro
 			if ocdOutput {
 				// Make it clear which output is from the daemon.
 				w := &ColorWriter{
-					Out:    os.Stderr,
+					Out:    colorable.NewColorableStderr(),
 					Prefix: "openocd: ",
 					Color:  TermColorYellow,
 				}
@@ -407,7 +406,7 @@ func FlashGDB(pkgName string, ocdOutput bool, options *compileopts.Options) erro
 			if ocdOutput {
 				// Make it clear which output is from the daemon.
 				w := &ColorWriter{
-					Out:    os.Stderr,
+					Out:    colorable.NewColorableStderr(),
 					Prefix: "jlink: ",
 					Color:  TermColorYellow,
 				}
@@ -464,8 +463,15 @@ func FlashGDB(pkgName string, ocdOutput bool, options *compileopts.Options) erro
 			}
 			defer func() {
 				daemon.Process.Signal(os.Interrupt)
-				// Maybe we should send a .Kill() after x seconds?
+				var stopped uint32
+				go func() {
+					time.Sleep(time.Millisecond * 100)
+					if atomic.LoadUint32(&stopped) == 0 {
+						daemon.Process.Kill()
+					}
+				}()
 				daemon.Wait()
+				atomic.StoreUint32(&stopped, 1)
 			}()
 		}
 
@@ -767,6 +773,15 @@ func printCompilerError(logln func(...interface{}), err error) {
 				logln()
 			}
 		}
+	case transform.CoroutinesError:
+		logln(err.Pos.String() + ": " + err.Msg)
+		logln("\ntraceback:")
+		for _, line := range err.Traceback {
+			logln(line.Name)
+			if line.Position.IsValid() {
+				logln("\t" + line.Position.String())
+			}
+		}
 	case loader.Errors:
 		logln("#", err.Pkg.ImportPath)
 		for _, err := range err.Errs {
@@ -1061,10 +1076,7 @@ func main() {
 		err = cmd.Run()
 		if err != nil {
 			if exitErr, ok := err.(*exec.ExitError); ok {
-				if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-					os.Exit(status.ExitStatus())
-				}
-				os.Exit(1)
+				os.Exit(exitErr.ExitCode())
 			}
 			fmt.Fprintln(os.Stderr, "failed to run `go list`:", err)
 			os.Exit(1)
